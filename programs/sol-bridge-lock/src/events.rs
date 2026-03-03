@@ -1,0 +1,121 @@
+use anchor_lang::prelude::*;
+
+/// ═══════════════════════════════════════════════════════════════
+/// BRIDGE EVENTS — Canonical on-chain events for validator observation
+/// ═══════════════════════════════════════════════════════════════
+
+/// Emitted when SOL is deposited into the bridge vault.
+/// Validators watch for this event to initiate minting on DCC.
+#[event]
+pub struct BridgeDeposit {
+    /// Globally unique transfer identifier
+    pub transfer_id: [u8; 32],
+    /// Depositor's Solana public key
+    pub sender: Pubkey,
+    /// Recipient address on DecentralChain
+    pub recipient_dcc: [u8; 32],
+    /// Amount in lamports
+    pub amount: u64,
+    /// User-specific monotonic nonce
+    pub nonce: u64,
+    /// Solana slot at deposit time
+    pub slot: u64,
+    /// Unix timestamp
+    pub timestamp: i64,
+    /// Solana chain ID (domain separation)
+    pub chain_id: u32,
+}
+
+/// Emitted when SPL tokens are deposited into the bridge vault.
+/// Includes the SPL mint address so DCC knows which wrapped token to mint.
+#[event]
+pub struct BridgeDepositSpl {
+    /// Globally unique transfer identifier
+    pub transfer_id: [u8; 32],
+    /// Depositor's Solana public key
+    pub sender: Pubkey,
+    /// Recipient address on DecentralChain
+    pub recipient_dcc: [u8; 32],
+    /// SPL token mint address
+    pub spl_mint: Pubkey,
+    /// Amount in smallest token units
+    pub amount: u64,
+    /// User-specific monotonic nonce
+    pub nonce: u64,
+    /// Solana slot at deposit time
+    pub slot: u64,
+    /// Unix timestamp
+    pub timestamp: i64,
+    /// Solana chain ID (domain separation)
+    pub chain_id: u32,
+}
+
+/// Emitted when SOL is unlocked from the vault after DCC burn verification.
+#[event]
+pub struct BridgeUnlock {
+    /// Transfer ID from the DCC burn
+    pub transfer_id: [u8; 32],
+    /// Recipient Solana address
+    pub recipient: Pubkey,
+    /// Amount unlocked in lamports
+    pub amount: u64,
+    /// DCC burn transaction hash
+    pub burn_tx_hash: [u8; 32],
+    /// Unix timestamp of unlock
+    pub timestamp: i64,
+    /// Number of validator signatures provided
+    pub signature_count: u8,
+}
+
+/// Emitted when the bridge is paused.
+#[event]
+pub struct BridgePaused {
+    /// Authority that triggered the pause
+    pub authority: Pubkey,
+    /// Timestamp of pause
+    pub timestamp: i64,
+}
+
+/// Emitted when the bridge is resumed.
+#[event]
+pub struct BridgeResumed {
+    /// Authority that triggered the resume
+    pub authority: Pubkey,
+    /// Timestamp of resume
+    pub timestamp: i64,
+}
+
+/// Emitted when a validator is registered.
+#[event]
+pub struct ValidatorRegistered {
+    /// Validator's public key
+    pub validator: Pubkey,
+    /// Current validator count
+    pub validator_count: u8,
+    /// Timestamp
+    pub timestamp: i64,
+}
+
+/// Emitted when a validator is removed.
+#[event]
+pub struct ValidatorRemoved {
+    /// Validator's public key
+    pub validator: Pubkey,
+    /// Current validator count
+    pub validator_count: u8,
+    /// Timestamp
+    pub timestamp: i64,
+}
+
+/// Emitted when circuit breaker triggers.
+#[event]
+pub struct CircuitBreakerTriggered {
+    /// Type of circuit breaker
+    pub breaker_type: String,
+    /// Current value that triggered the breaker
+    pub current_value: u64,
+    /// Threshold that was exceeded
+    pub threshold: u64,
+    /// Timestamp
+    pub timestamp: i64,
+}
