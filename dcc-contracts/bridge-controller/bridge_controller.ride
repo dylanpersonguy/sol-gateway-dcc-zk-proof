@@ -1,0 +1,760 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+# DecentralChain Bridge Controller — Multi-Token v2
+#
+# SECURITY-CRITICAL smart contract that manages the DCC side of the
+# SOL <> DecentralChain bridge. Supports native SOL + arbitrary SPL tokens.
+#
+# Token Registry: each registered SPL token gets a wrapped DCC asset via Issue().
+# State keys: token_{splMint}_asset_id, token_{splMint}_name, etc.
+#
+# DCC RIDE script v5 compatible
+
+# ═══════════════════════════════════════════════════════════════
+# CONSTANTS
+# ═══════════════════════════════════════════════════════════════
+
+let bridgeVersion = "2.0.0"
+let solChainId = 1
+let dccChainId = 2
+let domainSeparator = "SOL_DCC_BRIDGE_V2"
+let maxValidators = 20
+let minValidatorThreshold = 1
+let transferExpiryBlocks = 1440
+
+# Rate limits (apply in raw Solana smallest-unit scale)
+let maxDailyMint = 1000000000000
+let maxSingleMint = 100000000000
+let minMintAmount = 1000
+let largeTxThreshold = 50000000000
+let largeTxDelayBlocks = 60
+let rateLimitWindow = 1440
+let maxRegisteredTokens = 50
+
+# Special sentinel SPL mint for native SOL
+let nativeSolMint = "So11111111111111111111111111111111111111112"
+
+# ═══════════════════════════════════════════════════════════════
+# STATE KEYS
+# ═══════════════════════════════════════════════════════════════
+
+func keyAdmin() = "admin"
+func keyGuardian() = "guardian"
+func keyPaused() = "paused"
+func keyWsolAssetId() = "wsol_asset_id"
+func keyTotalMinted() = "total_minted"
+func keyTotalBurned() = "total_burned"
+func keyGlobalNonce() = "global_nonce"
+func keyValidatorCount() = "validator_count"
+func keyMinValidators() = "min_validators"
+func keyDailyMinted() = "daily_minted"
+func keyDailyResetHeight() = "daily_reset_height"
+func keyMaxDailyMint() = "max_daily_mint"
+func keyMaxSingleMint() = "max_single_mint"
+func keyRegisteredTokenCount() = "registered_token_count"
+
+func keyValidator(index: Int) = "validator_" + index.toString()
+func keyValidatorActive(pubkey: String) = "validator_active_" + pubkey
+func keyProcessedTransfer(transferId: String) = "processed_" + transferId
+func keyPendingLargeTx(transferId: String) = "pending_large_" + transferId
+func keyPendingLargeTxHeight(transferId: String) = "pending_large_height_" + transferId
+func keyBurnRecord(burnId: String) = "burn_" + burnId
+func keyBurnNonce(address: String) = "burn_nonce_" + address
+
+# Token registry keys — keyed by SPL mint address (base58)
+func keyTokenAssetId(splMint: String) = "token_" + splMint + "_asset_id"
+func keyTokenName(splMint: String) = "token_" + splMint + "_name"
+func keyTokenSolDecimals(splMint: String) = "token_" + splMint + "_sol_decimals"
+func keyTokenDccDecimals(splMint: String) = "token_" + splMint + "_dcc_decimals"
+func keyTokenDecimalDivisor(splMint: String) = "token_" + splMint + "_divisor"
+func keyTokenEnabled(splMint: String) = "token_" + splMint + "_enabled"
+func keyTokenTotalMinted(splMint: String) = "token_" + splMint + "_total_minted"
+func keyTokenTotalBurned(splMint: String) = "token_" + splMint + "_total_burned"
+
+# ═══════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS
+# ═══════════════════════════════════════════════════════════════
+
+func isAdmin(caller: Address) = {
+    let admin = getStringValue(this, keyAdmin())
+    caller.toString() == admin
+}
+
+func isGuardian(caller: Address) = {
+    let guardian = getStringValue(this, keyGuardian())
+    caller.toString() == guardian
+}
+
+func isPaused() = {
+    getBooleanValue(this, keyPaused())
+}
+
+func getValidatorCount() = {
+    getIntegerValue(this, keyValidatorCount())
+}
+
+func getMinValidators() = {
+    getIntegerValue(this, keyMinValidators())
+}
+
+func isValidatorActive(pubkey: String) = {
+    match getBoolean(this, keyValidatorActive(pubkey)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func isTransferProcessed(transferId: String) = {
+    match getBoolean(this, keyProcessedTransfer(transferId)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func isTokenRegistered(splMint: String) = {
+    isDefined(getString(this, keyTokenAssetId(splMint)))
+}
+
+func isTokenEnabled(splMint: String) = {
+    match getBoolean(this, keyTokenEnabled(splMint)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func getTokenDccAssetId(splMint: String) = {
+    getStringValue(this, keyTokenAssetId(splMint))
+}
+
+func getTokenDecimalDivisor(splMint: String) = {
+    match getInteger(this, keyTokenDecimalDivisor(splMint)) {
+        case d: Int => d
+        case _ => 1
+    }
+}
+
+# Canonical message for sig verification
+func constructMintMessage(
+    transferId: String,
+    recipient: String,
+    amount: Int,
+    solSlot: Int,
+    splMint: String,
+    chainId: Int
+) = {
+    domainSeparator + "|MINT|" +
+    transferId + "|" +
+    recipient + "|" +
+    amount.toString() + "|" +
+    solSlot.toString() + "|" +
+    splMint + "|" +
+    chainId.toString()
+}
+
+# Legacy message format (for backward-compat mint)
+func constructLegacyMintMessage(
+    transferId: String,
+    recipient: String,
+    amount: Int,
+    solSlot: Int,
+    chainId: Int
+) = {
+    "SOL_DCC_BRIDGE_V1|MINT|" +
+    transferId + "|" +
+    recipient + "|" +
+    amount.toString() + "|" +
+    solSlot.toString() + "|" +
+    chainId.toString()
+}
+
+# Verify M-of-N validator signatures
+func verifyValidatorSignatures(
+    message: ByteVector,
+    signatures: List[ByteVector],
+    pubkeys: List[ByteVector],
+    minRequired: Int
+) = {
+    let count = size(signatures)
+    if (count < minRequired) then throw("Insufficient signatures: " + count.toString() + " < " + minRequired.toString())
+    else {
+        func verifyOne(acc: Int, idx: Int) = {
+            if (idx >= count) then acc
+            else {
+                let pubkey = pubkeys[idx]
+                let sig = signatures[idx]
+                let pubkeyStr = toBase58String(pubkey)
+                
+                if (!isValidatorActive(pubkeyStr)) then throw("Validator not active: " + pubkeyStr)
+                else if (!sigVerify(message, sig, pubkey)) then throw("Invalid signature from: " + pubkeyStr)
+                else acc + 1
+            }
+        }
+        
+        let valid = FOLD<20>(
+            [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19],
+            0,
+            verifyOne
+        )
+        
+        if (valid < minRequired) then throw("Valid signatures below threshold")
+        else true
+    }
+}
+
+# Check & update daily rate limit
+func checkDailyLimit(amount: Int) = {
+    let currentHeight = height
+    let resetHeight = match getInteger(this, keyDailyResetHeight()) {
+        case h: Int => h
+        case _ => 0
+    }
+    let dailyMinted = if (currentHeight - resetHeight >= rateLimitWindow) then 0
+        else match getInteger(this, keyDailyMinted()) {
+            case m: Int => m
+            case _ => 0
+        }
+    let maxDaily = match getInteger(this, keyMaxDailyMint()) {
+        case m: Int => m
+        case _ => maxDailyMint
+    }
+    
+    if (dailyMinted + amount > maxDaily) then throw("Daily mint limit exceeded")
+    else {
+        let newResetHeight = if (currentHeight - resetHeight >= rateLimitWindow) then currentHeight
+            else resetHeight
+        (dailyMinted + amount, newResetHeight)
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# INITIALIZE
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func initialize(
+    guardian: String,
+    minValidators: Int
+) = {
+    if (isDefined(getString(this, keyAdmin()))) then throw("Already initialized")
+    else if (minValidators < minValidatorThreshold) then throw("Min validators too low")
+    else {
+        # Issue wSOL.DCC — the wrapped native SOL asset
+        let wsolIssue = Issue("Wrapped SOL", "Wrapped SOL bridged from Solana via sol-gateway-dcc", 0, 8, true)
+        let wsolAssetId = toBase58String(calculateAssetId(wsolIssue))
+        [
+            wsolIssue,
+            StringEntry(keyAdmin(), i.caller.toString()),
+            StringEntry(keyGuardian(), guardian),
+            BooleanEntry(keyPaused(), false),
+            StringEntry(keyWsolAssetId(), wsolAssetId),
+            IntegerEntry(keyTotalMinted(), 0),
+            IntegerEntry(keyTotalBurned(), 0),
+            IntegerEntry(keyGlobalNonce(), 0),
+            IntegerEntry(keyValidatorCount(), 0),
+            IntegerEntry(keyMinValidators(), minValidators),
+            IntegerEntry(keyDailyMinted(), 0),
+            IntegerEntry(keyDailyResetHeight(), height),
+            IntegerEntry(keyMaxDailyMint(), maxDailyMint),
+            IntegerEntry(keyMaxSingleMint(), maxSingleMint),
+            IntegerEntry(keyRegisteredTokenCount(), 1),
+            # Register native SOL in token registry
+            StringEntry(keyTokenAssetId(nativeSolMint), wsolAssetId),
+            StringEntry(keyTokenName(nativeSolMint), "Wrapped SOL"),
+            IntegerEntry(keyTokenSolDecimals(nativeSolMint), 9),
+            IntegerEntry(keyTokenDccDecimals(nativeSolMint), 8),
+            IntegerEntry(keyTokenDecimalDivisor(nativeSolMint), 10),
+            BooleanEntry(keyTokenEnabled(nativeSolMint), true),
+            IntegerEntry(keyTokenTotalMinted(nativeSolMint), 0),
+            IntegerEntry(keyTokenTotalBurned(nativeSolMint), 0)
+        ]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# TOKEN REGISTRY
+# ═══════════════════════════════════════════════════════════════
+
+# Register a new SPL token — issues a wrapped DCC asset
+# splMint:     Solana mint address (base58)
+# tokenName:   e.g. "Wrapped USDC"
+# tokenSymbol: short name for DCC Issue, e.g. "wUSDC"
+# tokenDesc:   description string
+# solDecimals: decimals on Solana (e.g. 6 for USDC)
+# dccDecimals: decimals on DCC (max 8)
+@Callable(i)
+func registerToken(
+    splMint: String,
+    tokenName: String,
+    tokenSymbol: String,
+    tokenDesc: String,
+    solDecimals: Int,
+    dccDecimals: Int
+) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (isTokenRegistered(splMint)) then throw("Token already registered: " + splMint)
+    else if (dccDecimals < 0 || dccDecimals > 8) then throw("DCC decimals must be 0-8")
+    else if (solDecimals < 0 || solDecimals > 18) then throw("Sol decimals must be 0-18")
+    else if (size(splMint) < 32 || size(splMint) > 44) then throw("Invalid SPL mint address length")
+    else {
+        let count = match getInteger(this, keyRegisteredTokenCount()) {
+            case c: Int => c
+            case _ => 0
+        }
+        if (count >= maxRegisteredTokens) then throw("Max registered tokens reached")
+        else {
+            # 10^(solDecimals - dccDecimals).  If dccDecimals >= solDecimals, divisor = 1
+            let diff = solDecimals - dccDecimals
+            let divisor = if (diff <= 0) then 1
+                else if (diff == 1) then 10
+                else if (diff == 2) then 100
+                else if (diff == 3) then 1000
+                else if (diff == 4) then 10000
+                else if (diff == 5) then 100000
+                else if (diff == 6) then 1000000
+                else if (diff == 7) then 10000000
+                else if (diff == 8) then 100000000
+                else if (diff == 9) then 1000000000
+                else if (diff == 10) then 10000000000
+                else throw("Decimal difference too large: " + diff.toString())
+
+            let tokenIssue = Issue(tokenSymbol, tokenDesc, 0, dccDecimals, true)
+            let dccAssetId = toBase58String(calculateAssetId(tokenIssue))
+            [
+                tokenIssue,
+                StringEntry(keyTokenAssetId(splMint), dccAssetId),
+                StringEntry(keyTokenName(splMint), tokenName),
+                IntegerEntry(keyTokenSolDecimals(splMint), solDecimals),
+                IntegerEntry(keyTokenDccDecimals(splMint), dccDecimals),
+                IntegerEntry(keyTokenDecimalDivisor(splMint), divisor),
+                BooleanEntry(keyTokenEnabled(splMint), true),
+                IntegerEntry(keyTokenTotalMinted(splMint), 0),
+                IntegerEntry(keyTokenTotalBurned(splMint), 0),
+                IntegerEntry(keyRegisteredTokenCount(), count + 1)
+            ]
+        }
+    }
+}
+
+# Enable / disable a registered token
+@Callable(i)
+func setTokenEnabled(splMint: String, enabled: Boolean) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (!isTokenRegistered(splMint)) then throw("Token not registered: " + splMint)
+    else {
+        [BooleanEntry(keyTokenEnabled(splMint), enabled)]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# VALIDATORS
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func registerValidator(pubkeyBase58: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (isValidatorActive(pubkeyBase58)) then throw("Validator already active")
+    else {
+        let count = getValidatorCount()
+        if (count >= maxValidators) then throw("Max validators reached")
+        else {
+            [
+                StringEntry(keyValidator(count), pubkeyBase58),
+                BooleanEntry(keyValidatorActive(pubkeyBase58), true),
+                IntegerEntry(keyValidatorCount(), count + 1)
+            ]
+        }
+    }
+}
+
+@Callable(i)
+func removeValidator(pubkeyBase58: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (!isValidatorActive(pubkeyBase58)) then throw("Validator not active")
+    else {
+        let count = getValidatorCount()
+        let minVal = getMinValidators()
+        if (count - 1 < minVal) then throw("Would breach minimum validator threshold")
+        else {
+            [
+                BooleanEntry(keyValidatorActive(pubkeyBase58), false),
+                IntegerEntry(keyValidatorCount(), count - 1)
+            ]
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# MINT TOKEN — Generic multi-token mint
+# ═══════════════════════════════════════════════════════════════
+#
+# Validators call this after confirming a deposit on Solana.
+# splMint: Solana SPL mint address (use nativeSolMint for SOL)
+# amount:  in smallest Solana units (lamports for SOL, raw for SPL)
+#
+@Callable(i)
+func mintToken(
+    transferId: String,
+    recipient: String,
+    amount: Int,
+    solSlot: Int,
+    splMint: String,
+    signatures: List[ByteVector],
+    pubkeys: List[ByteVector]
+) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else if (isTransferProcessed(transferId)) then throw("Transfer already processed: " + transferId)
+    else if (!isTokenRegistered(splMint)) then throw("Token not registered: " + splMint)
+    else if (!isTokenEnabled(splMint)) then throw("Token is disabled: " + splMint)
+    else if (amount < minMintAmount) then throw("Amount below minimum")
+    else {
+        let minRequired = getMinValidators()
+        let sigCount = size(signatures)
+        if (sigCount < minRequired) then throw("Insufficient signatures")
+        else {
+            let (newDailyMinted, newResetHeight) = checkDailyLimit(amount)
+            
+            let dccAssetId = getTokenDccAssetId(splMint)
+            let divisor = getTokenDecimalDivisor(splMint)
+            let mintAmount = if (divisor > 1) then amount / divisor else amount
+            
+            if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
+            else {
+                let recipientAddr = addressFromStringValue(recipient)
+                let nonce = getIntegerValue(this, keyGlobalNonce())
+                let tokenMinted = match getInteger(this, keyTokenTotalMinted(splMint)) {
+                    case m: Int => m
+                    case _ => 0
+                }
+                
+                if (amount >= largeTxThreshold) then {
+                    [
+                        BooleanEntry(keyPendingLargeTx(transferId), true),
+                        IntegerEntry(keyPendingLargeTxHeight(transferId), height),
+                        StringEntry("pending_recipient_" + transferId, recipient),
+                        IntegerEntry("pending_amount_" + transferId, mintAmount),
+                        StringEntry("pending_spl_mint_" + transferId, splMint),
+                        BooleanEntry(keyProcessedTransfer(transferId), true),
+                        IntegerEntry(keyDailyMinted(), newDailyMinted),
+                        IntegerEntry(keyDailyResetHeight(), newResetHeight)
+                    ]
+                }
+                else {
+                    [
+                        BooleanEntry(keyProcessedTransfer(transferId), true),
+                        Reissue(fromBase58String(dccAssetId).value(), mintAmount, true),
+                        ScriptTransfer(recipientAddr, mintAmount, fromBase58String(dccAssetId).value()),
+                        IntegerEntry(keyTokenTotalMinted(splMint), tokenMinted + mintAmount),
+                        IntegerEntry(keyGlobalNonce(), nonce + 1),
+                        IntegerEntry(keyDailyMinted(), newDailyMinted),
+                        IntegerEntry(keyDailyResetHeight(), newResetHeight)
+                    ]
+                }
+            }
+        }
+    }
+}
+
+# Legacy mint() — backward compat for native SOL only
+@Callable(i)
+func mint(
+    transferId: String,
+    recipient: String,
+    amount: Int,
+    solSlot: Int,
+    signatures: List[ByteVector],
+    pubkeys: List[ByteVector]
+) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else if (isTransferProcessed(transferId)) then throw("Transfer already processed: " + transferId)
+    else if (amount < minMintAmount) then throw("Amount below minimum")
+    else {
+        let minRequired = getMinValidators()
+        let sigCount = size(signatures)
+        if (sigCount < minRequired) then throw("Insufficient signatures")
+        else {
+            let (newDailyMinted, newResetHeight) = checkDailyLimit(amount)
+            let wsolAssetId = getStringValue(this, keyWsolAssetId())
+            let recipientAddr = addressFromStringValue(recipient)
+            let totalMinted = getIntegerValue(this, keyTotalMinted())
+            let nonce = getIntegerValue(this, keyGlobalNonce())
+            let divisor = getTokenDecimalDivisor(nativeSolMint)
+            let mintAmount = amount / divisor
+            if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
+            else {
+                let tokenMinted = match getInteger(this, keyTokenTotalMinted(nativeSolMint)) {
+                    case m: Int => m
+                    case _ => 0
+                }
+                [
+                    BooleanEntry(keyProcessedTransfer(transferId), true),
+                    Reissue(fromBase58String(wsolAssetId).value(), mintAmount, true),
+                    ScriptTransfer(recipientAddr, mintAmount, fromBase58String(wsolAssetId).value()),
+                    IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                    IntegerEntry(keyTokenTotalMinted(nativeSolMint), tokenMinted + mintAmount),
+                    IntegerEntry(keyGlobalNonce(), nonce + 1),
+                    IntegerEntry(keyDailyMinted(), newDailyMinted),
+                    IntegerEntry(keyDailyResetHeight(), newResetHeight)
+                ]
+            }
+        }
+    }
+}
+
+# Execute a pending large transaction after delay
+@Callable(i)
+func executePendingMint(transferId: String) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else {
+        let isPending = match getBoolean(this, keyPendingLargeTx(transferId)) {
+            case b: Boolean => b
+            case _ => false
+        }
+        if (!isPending) then throw("No pending transaction: " + transferId)
+        else {
+            let scheduledHeight = getIntegerValue(this, keyPendingLargeTxHeight(transferId))
+            if (height - scheduledHeight < largeTxDelayBlocks) then 
+                throw("Delay not elapsed. Wait " + (largeTxDelayBlocks - (height - scheduledHeight)).toString() + " more blocks")
+            else {
+                let recipient = getStringValue(this, "pending_recipient_" + transferId)
+                let amount = getIntegerValue(this, "pending_amount_" + transferId)
+                let splMint = match getString(this, "pending_spl_mint_" + transferId) {
+                    case s: String => s
+                    case _ => nativeSolMint
+                }
+                let dccAssetId = getTokenDccAssetId(splMint)
+                let recipientAddr = addressFromStringValue(recipient)
+                let nonce = getIntegerValue(this, keyGlobalNonce())
+                let tokenMinted = match getInteger(this, keyTokenTotalMinted(splMint)) {
+                    case m: Int => m
+                    case _ => 0
+                }
+                
+                [
+                    DeleteEntry(keyPendingLargeTx(transferId)),
+                    DeleteEntry(keyPendingLargeTxHeight(transferId)),
+                    DeleteEntry("pending_recipient_" + transferId),
+                    DeleteEntry("pending_amount_" + transferId),
+                    DeleteEntry("pending_spl_mint_" + transferId),
+                    Reissue(fromBase58String(dccAssetId).value(), amount, true),
+                    ScriptTransfer(recipientAddr, amount, fromBase58String(dccAssetId).value()),
+                    IntegerEntry(keyTokenTotalMinted(splMint), tokenMinted + amount),
+                    IntegerEntry(keyGlobalNonce(), nonce + 1)
+                ]
+            }
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# BURN TOKEN — Generic multi-token burn for redemption
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func burnToken(solRecipient: String, splMint: String) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else if (!isTokenRegistered(splMint)) then throw("Token not registered")
+    else {
+        let dccAssetId = getTokenDccAssetId(splMint)
+        let payment = i.payments[0]
+        
+        if (!isDefined(payment.assetId)) then throw("Must attach wrapped token")
+        else if (toBase58String(payment.assetId.value()) != dccAssetId) then throw("Wrong token — attach the correct wrapped asset")
+        else if (payment.amount < minMintAmount) then throw("Burn amount below minimum")
+        else {
+            let userNonce = match getInteger(this, keyBurnNonce(i.caller.toString())) {
+                case n: Int => n
+                case _ => 0
+            }
+            let tokenBurned = match getInteger(this, keyTokenTotalBurned(splMint)) {
+                case b: Int => b
+                case _ => 0
+            }
+            let burnId = toBase58String(sha256(
+                i.caller.bytes + 
+                userNonce.toBytes() + 
+                height.toBytes() + 
+                payment.amount.toBytes()
+            ))
+            
+            [
+                Burn(payment.assetId.value(), payment.amount),
+                StringEntry(keyBurnRecord(burnId), 
+                    i.caller.toString() + "|" + 
+                    solRecipient + "|" + 
+                    splMint + "|" +
+                    payment.amount.toString() + "|" + 
+                    height.toString() + "|" +
+                    lastBlock.timestamp.toString()
+                ),
+                IntegerEntry(keyTokenTotalBurned(splMint), tokenBurned + payment.amount),
+                IntegerEntry(keyBurnNonce(i.caller.toString()), userNonce + 1)
+            ]
+        }
+    }
+}
+
+# Legacy burn() — backward compat for wSOL only
+@Callable(i)
+func burn(solRecipient: String) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else {
+        let wsolAssetId = getStringValue(this, keyWsolAssetId())
+        let payment = i.payments[0]
+        
+        if (!isDefined(payment.assetId)) then throw("Must attach wSOL.DCC token")
+        else if (toBase58String(payment.assetId.value()) != wsolAssetId) then throw("Wrong token — must be wSOL.DCC")
+        else if (payment.amount < minMintAmount) then throw("Burn amount below minimum")
+        else {
+            let userNonce = match getInteger(this, keyBurnNonce(i.caller.toString())) {
+                case n: Int => n
+                case _ => 0
+            }
+            let totalBurned = getIntegerValue(this, keyTotalBurned())
+            let tokenBurned = match getInteger(this, keyTokenTotalBurned(nativeSolMint)) {
+                case b: Int => b
+                case _ => 0
+            }
+            let burnId = toBase58String(sha256(
+                i.caller.bytes + 
+                userNonce.toBytes() + 
+                height.toBytes() + 
+                payment.amount.toBytes()
+            ))
+            
+            [
+                Burn(payment.assetId.value(), payment.amount),
+                StringEntry(keyBurnRecord(burnId), 
+                    i.caller.toString() + "|" + 
+                    solRecipient + "|" + 
+                    nativeSolMint + "|" +
+                    payment.amount.toString() + "|" + 
+                    height.toString() + "|" +
+                    lastBlock.timestamp.toString()
+                ),
+                IntegerEntry(keyTotalBurned(), totalBurned + payment.amount),
+                IntegerEntry(keyTokenTotalBurned(nativeSolMint), tokenBurned + payment.amount),
+                IntegerEntry(keyBurnNonce(i.caller.toString()), userNonce + 1)
+            ]
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# EMERGENCY CONTROLS
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func emergencyPause() = {
+    if (!isAdmin(i.caller) && !isGuardian(i.caller)) then throw("Unauthorized")
+    else {
+        [BooleanEntry(keyPaused(), true)]
+    }
+}
+
+@Callable(i)
+func emergencyResume() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can resume")
+    else {
+        [BooleanEntry(keyPaused(), false)]
+    }
+}
+
+@Callable(i)
+func cancelPendingMint(transferId: String) = {
+    if (!isAdmin(i.caller) && !isGuardian(i.caller)) then throw("Unauthorized")
+    else {
+        [
+            DeleteEntry(keyPendingLargeTx(transferId)),
+            DeleteEntry(keyPendingLargeTxHeight(transferId)),
+            DeleteEntry("pending_recipient_" + transferId),
+            DeleteEntry("pending_amount_" + transferId),
+            DeleteEntry("pending_spl_mint_" + transferId)
+        ]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# CONFIG UPDATES
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func updateMaxDailyMint(newMax: Int) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (newMax <= 0) then throw("Invalid max daily mint")
+    else {
+        [IntegerEntry(keyMaxDailyMint(), newMax)]
+    }
+}
+
+@Callable(i)
+func updateMaxSingleMint(newMax: Int) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (newMax <= 0) then throw("Invalid max single mint")
+    else {
+        [IntegerEntry(keyMaxSingleMint(), newMax)]
+    }
+}
+
+@Callable(i)
+func transferAdmin(newAdmin: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [StringEntry(keyAdmin(), newAdmin)]
+    }
+}
+
+@Callable(i) 
+func updateGuardian(newGuardian: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [StringEntry(keyGuardian(), newGuardian)]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# READ-ONLY VIEWS
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func getStats() = {
+    let totalMinted = getIntegerValue(this, keyTotalMinted())
+    let totalBurned = getIntegerValue(this, keyTotalBurned())
+    let outstanding = totalMinted - totalBurned
+    let validatorCount = getValidatorCount()
+    let paused = isPaused()
+    let tokenCount = match getInteger(this, keyRegisteredTokenCount()) {
+        case c: Int => c
+        case _ => 0
+    }
+    
+    (
+        [],
+        (totalMinted, totalBurned, outstanding, validatorCount, paused, tokenCount)
+    )
+}
+
+@Callable(i)
+func getTokenInfo(splMint: String) = {
+    if (!isTokenRegistered(splMint)) then throw("Token not registered")
+    else {
+        let name = getStringValue(this, keyTokenName(splMint))
+        let dccAssetId = getStringValue(this, keyTokenAssetId(splMint))
+        let solDec = getIntegerValue(this, keyTokenSolDecimals(splMint))
+        let dccDec = getIntegerValue(this, keyTokenDccDecimals(splMint))
+        let enabled = isTokenEnabled(splMint)
+        let minted = match getInteger(this, keyTokenTotalMinted(splMint)) {
+            case m: Int => m
+            case _ => 0
+        }
+        let burned = match getInteger(this, keyTokenTotalBurned(splMint)) {
+            case b: Int => b
+            case _ => 0
+        }
+        (
+            [],
+            (name, dccAssetId, solDec, dccDec, enabled, minted, burned)
+        )
+    }
+}

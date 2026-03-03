@@ -1,0 +1,100 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+# wSOL.DCC Token Contract
+#
+# Wrapped SOL token on DecentralChain.
+# This token can ONLY be minted/burned by the bridge controller.
+
+let wsolDecimals = 9
+let wsolName = "Wrapped SOL"
+let wsolDescription = "Wrapped SOL bridged from Solana via sol-gateway-dcc"
+
+func keyBridgeContract() = "bridge_contract"
+func keyAssetId() = "wsol_asset_id"  
+func keyFrozen() = "frozen"
+func keyAdmin() = "admin"
+func keyTotalIssued() = "total_issued"
+
+func isBridge(caller: Address) = {
+    let bridge = getStringValue(this, keyBridgeContract())
+    caller.toString() == bridge
+}
+
+func isAdmin(caller: Address) = {
+    let admin = getStringValue(this, keyAdmin())
+    caller.toString() == admin
+}
+
+func isFrozen() = {
+    match getBoolean(this, keyFrozen()) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+# Initialize the wSOL token
+@Callable(i)
+func initialize(bridgeContract: String) = {
+    if (isDefined(getString(this, keyAdmin()))) then throw("Already initialized")
+    else {
+        let issue = Issue(wsolName, wsolDescription, 0, wsolDecimals, true)
+        let assetId = calculateAssetId(issue)
+        [
+            issue,
+            StringEntry(keyAdmin(), i.caller.toString()),
+            StringEntry(keyBridgeContract(), bridgeContract),
+            StringEntry(keyAssetId(), toBase58String(assetId)),
+            BooleanEntry(keyFrozen(), false),
+            IntegerEntry(keyTotalIssued(), 0)
+        ]
+    }
+}
+
+# Emergency freeze — prevents all transfers
+@Callable(i)
+func freeze() = {
+    if (!isAdmin(i.caller) && !isBridge(i.caller)) then throw("Unauthorized")
+    else {
+        [BooleanEntry(keyFrozen(), true)]
+    }
+}
+
+# Unfreeze
+@Callable(i)
+func unfreeze() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can unfreeze")
+    else {
+        [BooleanEntry(keyFrozen(), false)]
+    }
+}
+
+# Update bridge contract address (admin only, for upgrades)
+@Callable(i)
+func updateBridgeContract(newBridge: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [StringEntry(keyBridgeContract(), newBridge)]
+    }
+}
+
+@Verifier(tx)
+func verify() = {
+    match tx {
+        case t: ReissueTransaction =>
+            # Only bridge controller can reissue (mint)
+            let bridge = getStringValue(this, keyBridgeContract())
+            sigVerify(t.bodyBytes, t.proofs[0], fromBase58String(bridge))
+        case t: BurnTransaction =>
+            # Bridge controller can burn
+            let bridge = getStringValue(this, keyBridgeContract())
+            sigVerify(t.bodyBytes, t.proofs[0], fromBase58String(bridge))
+        case t: InvokeScriptTransaction =>
+            sigVerify(t.bodyBytes, t.proofs[0], t.senderPublicKey)
+        case _ =>
+            # All other transaction types require admin signature
+            let admin = getStringValue(this, keyAdmin())
+            sigVerify(tx.bodyBytes, tx.proofs[0], fromBase58String(admin))
+    }
+}
