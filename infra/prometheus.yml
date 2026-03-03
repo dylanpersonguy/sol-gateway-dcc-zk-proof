@@ -1,0 +1,30 @@
+# Prometheus scrape configuration for SOL ⇄ DCC Bridge
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "validator-1"
+    static_configs:
+      - targets: ["validator-1:9090"]
+        labels:
+          node_id: "validator-1"
+
+  - job_name: "validator-2"
+    static_configs:
+      - targets: ["validator-2:9091"]
+        labels:
+          node_id: "validator-2"
+
+  - job_name: "validator-3"
+    static_configs:
+      - targets: ["validator-3:9092"]
+        labels:
+          node_id: "validator-3"
+
+  - job_name: "monitor"
+    static_configs:
+      - targets: ["monitor:9095"]
+        labels:
+          component: "monitor"
