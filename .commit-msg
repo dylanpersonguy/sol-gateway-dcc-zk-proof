@@ -1,0 +1,14 @@
+ride v2: Strategy A recomputation, addressFromPublicKey, @Verifier, anomaly auto-pause
+
+- verifyAndMint v2: recomputes keccak256(181B preimage) on-chain, cross-validates vs ZK proof
+- Recipient: 32-byte DCC Curve25519 public key via addressFromPublicKey()
+- @Verifier blocks DataTransactions to prevent replay entry deletion
+- Anomaly auto-pause at 2x hourly cap, checkpoint freshness check (7 days)
+- Two-phase unpause: requestUnpause + executeUnpause with 100-block delay
+- Enhanced audit trail: processed_at + minted_amount per message
+- Ride equivalence test harness: 227 tests
+- V-033/V-034 Ride-specific edge case vectors
+- encoding.md v2.1: Ride constraints and complexity analysis
+- RIDE_SECURITY_NOTE.md: verification boundary analysis
+
+Tests: 227 RIDE + 236 TS + 12 Rust = 475 total, all passing

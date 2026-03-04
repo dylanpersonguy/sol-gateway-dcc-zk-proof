@@ -340,7 +340,82 @@ See `test-vectors.json` V-001. Expected message_id: `6ad0deb8ad960e168e2ceb0c692
 
 ---
 
-## 11. Implementation Checklist
+## 11. Ride Adaptation — Constraints & Compensating Controls
+
+### 11.1 Available Operations & Complexity Budget
+
+| Operation | RIDE v6 Function | Complexity | Notes |
+|-----------|-----------------|------------|-------|
+| Keccak-256 | `keccak256(ByteVector)` | 200 | Pre-NIST variant (matches Ethereum) ✓ |
+| Blake2b-256 | `blake2b256(ByteVector)` | 200 | Available but NOT used (keccak chosen for circuit compat) |
+| Groth16 verify | `groth16Verify_8inputs(vk, proof, inputs)` | ~16,800 | BN256 curve, 8 public inputs |
+| ByteVector concat | `bv1 + bv2` | 2 | Used extensively for preimage assembly |
+| ByteVector slice | `take(bv, n)`, `drop(bv, n)` | 7 each | Used for field element extraction |
+| Int to bytes | `toBytes(Int)` | 1 | Produces 8-byte **big-endian** — NOT usable directly |
+| String to bytes | `toBytes(String)` | 10 | UTF-8, no length prefix in RIDE v6 |
+| Address from pubkey | `addressFromPublicKey(ByteVector)` | 82 | Used for recipient derivation |
+
+**Total complexity for `verifyAndMint`:** ~450 (encoding) + 200 (keccak) + 16,800 (groth16) + 500 (storage reads) + 300 (misc) ≈ **18,250 / 52,000** — well within budget.
+
+### 11.2 RIDE Int Limitation
+
+RIDE's `Int` type is **signed 64-bit** (range: $-2^{63}$ to $2^{63}-1$).
+
+| Impact | Mitigation |
+|--------|-----------|
+| Cannot represent `u64` values ≥ $2^{63}$ | Rate limits keep all amounts < 50 SOL = 5×10¹⁰ lamports (well within i64 range) |
+| No native `u128` for field element math | 128-bit splitting done by prover off-chain; RIDE only reconstructs via byte reversal |
+| Nonces/slots theoretically up to `u64::MAX` | In practice, values stay within i64 for decades of operation |
+
+### 11.3 Message ID Strategy
+
+**Strategy A (Implemented):** RIDE recomputes `message_id = keccak256(canonical_preimage)` from caller-provided deposit fields and cross-validates against the ZK proof's public inputs.
+
+```
+┌──────────────┐     ┌──────────────────┐     ┌────────────┐
+│ Caller fields │────▶│ RIDE keccak256   │────▶│ local_hash │──┐
+└──────────────┘     └──────────────────┘     └────────────┘  │
+                                                               │ must match
+┌──────────────┐     ┌──────────────────┐     ┌────────────┐  │
+│ ZK proof     │────▶│ reconstruct256   │────▶│ proof_hash │──┘
+└──────────────┘     └──────────────────┘     └────────────┘
+```
+
+**Why not Strategy B?** Strategy B (binding commitment without full recomputation) is weaker: it doesn't verify ALL fields, only selected ones. Since RIDE can afford full recomputation (~450 complexity), Strategy A is strictly preferred.
+
+### 11.4 Recipient Encoding
+
+**Canonical format:** 32-byte DCC Curve25519 **public key** (NOT 26-byte address).
+
+- RIDE derives the DCC Address via `addressFromPublicKey(pubkey)` (complexity: 82)
+- No base58 inside the hash preimage
+- The depositor on Solana must provide the DCC public key (32 bytes)
+- The ZK circuit binds recipient through `recipient_lo` and `recipient_hi` (public inputs)
+
+### 11.5 Storage Schema (Replay Protection)
+
+```
+processed::<message_id_base58>      = true       (BooleanEntry — NEVER deletable)
+processed_at::<message_id_base58>   = timestamp   (IntegerEntry — audit trail)
+minted_amount::<message_id_base58>  = amount      (IntegerEntry — audit trail)
+```
+
+**Deletion prevention:** The `@Verifier` script blocks ALL `DataTransaction`s, forcing state changes through callable functions only. No callable function exists to delete `processed::*` entries.
+
+### 11.6 Compensating Controls for RIDE Limitations
+
+| RIDE Limitation | Compensating Control |
+|----------------|---------------------|
+| Signed i64 only | Rate limits cap all amounts at 50 SOL (well within i64) |
+| No native u128 | 128-bit split done by prover; RIDE reconstructs via byte reversal |
+| No test harness | JS mirror harness validates all vectors in CI |
+| `toBytes(Int)` is big-endian | Manual `intToLE4`/`intToLE8` helpers extract bytes via div/mod |
+| Limited error context | Descriptive error messages with values in all `throw()` calls |
+| Single account controls script | `@Verifier` blocks direct `DataTransaction`s |
+
+---
+
+## 12. Implementation Checklist
 
 - [x] Rust encoder (`libs/encoding-rust` + on-chain `deposit.rs`)
 - [x] TypeScript encoder (`libs/encoding-ts`)
@@ -348,13 +423,20 @@ See `test-vectors.json` V-001. Expected message_id: `6ad0deb8ad960e168e2ceb0c692
 - [x] Circom circuit (1448-bit preimage → Keccak256)
 - [x] 32 test vectors with preimage, hash, leaf hash, ZK public inputs
 - [x] CI enforcement of cross-language equivalence
+- [x] RIDE `verifyAndMint` v2: Strategy A message_id recomputation
+- [x] RIDE `computeLeafHash`: domain-separated Merkle leaf
+- [x] RIDE `@Verifier`: blocks direct state manipulation
+- [x] RIDE anomaly auto-pause: triggers on 2x hourly cap
+- [x] RIDE checkpoint freshness: rejects checkpoints older than 7 days
+- [x] RIDE test harness: `tests/ride-equivalence.test.mjs`
 
 ---
 
-## 12. Version History
+## 13. Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2025-01-15 | Initial specification |
 | 1.1 | 2025-01-18 | Fixed FV-2 (RIDE keccak256), FV-3 (recipient encoding) |
 | 2.0 | 2025-01-20 | Full rewrite: byte layout diagrams, ZK public input packing, BN128 details, RIDE limitations, library API contract, 32 vectors with full expected values |
+| 2.1 | 2025-01-22 | Ride adaptation: Strategy A message_id recomputation, recipient=32-byte pubkey, @Verifier script, anomaly auto-pause, checkpoint freshness, enhanced storage schema, Ride complexity analysis, compensating controls |

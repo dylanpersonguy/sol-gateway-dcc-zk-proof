@@ -46,6 +46,17 @@ let dailyWindow = 1440             # ~1440 blocks per day
 # Groth16 public input count (8 public inputs, each as field elements)
 let PUBLIC_INPUT_COUNT = 8
 
+# Proof format constraints
+let PROOF_MIN_SIZE = 192        # Minimum proof size (BN256 Groth16 ≥ 192 bytes)
+let INPUTS_SIZE = 256           # 8 field elements × 32 bytes each
+let PREIMAGE_SIZE = 181         # Deposit preimage: 17+4+4+32+8+4+32+32+8+8+32
+
+# Checkpoint freshness — reject proofs against stale checkpoints
+let maxCheckpointAge = 10080    # ~7 days in blocks (1 block ≈ 1 min)
+
+# Anomaly detection: auto-pause if hourly minting is abnormal
+let anomalyThresholdPerHour = 200000000000  # 200 SOL (2x normal hourly cap)
+
 # ═══════════════════════════════════════════════════════════════
 # STATE KEYS
 # ═══════════════════════════════════════════════════════════════
@@ -100,6 +111,10 @@ func keyPendingLargeTx(messageId: String) = "pending_large_" + messageId
 func keyPendingLargeTxHeight(messageId: String) = "pending_large_height_" + messageId
 func keyPendingRecipient(messageId: String) = "pending_recipient_" + messageId
 func keyPendingAmount(messageId: String) = "pending_amount_" + messageId
+
+# Enhanced audit trail
+func keyProcessedAt(messageId: String) = "processed_at_" + messageId
+func keyMintedAmount(messageId: String) = "minted_amount_" + messageId
 
 # Unpause timelock: must request then wait before resuming
 func keyUnpauseRequestedAt() = "unpause_requested_at"
@@ -283,6 +298,13 @@ func computeMessageId(
         keccak256(preimage)
         }
     }
+}
+
+# Compute leaf hash for Merkle tree: Keccak256(0x00 || message_id)
+# RFC 6962 §2.1 domain separation for Merkle leaves vs internal nodes.
+func computeLeafHash(messageId: ByteVector) = {
+    if (size(messageId) != 32) then throw("messageId must be 32 bytes")
+    else keccak256(toBytes(0).drop(7) + messageId)
 }
 
 # Check hourly rate limit
@@ -588,137 +610,178 @@ func deactivateCheckpoint(checkpointId: Int) = {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# VERIFY & MINT — Core ZK bridge function
+# VERIFY & MINT — Core ZK bridge function (v2)
 # ═══════════════════════════════════════════════════════════════
 #
 # Accepts a Groth16 proof and mints wSOL if it verifies.
 # NO multisig. The ZK proof IS the authority.
 #
-# FIX: ZK-H2 — Public inputs are now 8 field elements (each 32 bytes BE):
+# STRATEGY A: Ride recomputes message_id from caller-provided deposit fields
+# and cross-validates against the ZK proof's public inputs.
+# This provides defense-in-depth: even if the proving system has a bug,
+# RIDE independently verifies the message hash.
+#
+# PUBLIC INPUTS (8 field elements, each 32 bytes BE):
 #   [0] checkpoint_root_lo  (128-bit, lower half of root hash)
 #   [1] checkpoint_root_hi  (128-bit, upper half of root hash)
 #   [2] message_id_lo       (128-bit, lower half of message_id)
 #   [3] message_id_hi       (128-bit, upper half of message_id)
 #   [4] amount              (64-bit transfer amount)
-#   [5] recipient_lo        (128-bit, lower half of recipient address)
-#   [6] recipient_hi        (128-bit, upper half of recipient address)
+#   [5] recipient_lo        (128-bit, lower half of recipient pubkey)
+#   [6] recipient_hi        (128-bit, upper half of recipient pubkey)
 #   [7] version             (32-bit protocol version)
+#
+# RECIPIENT ENCODING:
+#   recipient is a 32-byte DCC Curve25519 public key (NOT a 26-byte address).
+#   RIDE derives the DCC Address via addressFromPublicKey(pubkey).
+#   No base58 inside hashes.
 
 @Callable(i)
 func verifyAndMint(
     proof: ByteVector,
     inputs: ByteVector,
     checkpointId: Int,
-    messageIdStr: String
+    srcChainId: Int,
+    dstChainId: Int,
+    srcProgramId: ByteVector,
+    slot: Int,
+    eventIndex: Int,
+    sender: ByteVector,
+    recipient: ByteVector,
+    amount: Int,
+    nonce: Int,
+    assetId: ByteVector
 ) = {
+    # ═══ PRE-FLIGHT CHECKS ═══
     if (isPaused()) then throw("Bridge is paused")
     else if (!isVkSet()) then throw("Verifying key not set")
-    else if (isMessageProcessed(messageIdStr)) then throw("Message already processed: " + messageIdStr)
+    else if (size(proof) < PROOF_MIN_SIZE) then throw("Proof too short: " + size(proof).toString() + " bytes")
+    else if (size(inputs) != INPUTS_SIZE) then throw("Invalid inputs length: expected 256 bytes (8 × 32), got " + size(inputs).toString())
     else if (!isCheckpointActive(checkpointId)) then throw("Checkpoint not active: " + checkpointId.toString())
     else {
-        # ═══════════════════════════════════════════════════════════
-        # EXTRACT ALL VALUES FROM ZK PROOF PUBLIC INPUTS
-        # FIX: ZK-H2/ATK-1 — 8 field elements × 32 bytes = 256 bytes
-        # FIX: ATK-2 — Correct byte-order parsing for amounts
-        # FIX: ZK-H3 — All values extracted FROM proof, not function params
-        # ═══════════════════════════════════════════════════════════
-
-        if (size(inputs) != 256) then throw("Invalid inputs length: expected 256 bytes (8 × 32)")
+        # ═══ CHECKPOINT FRESHNESS ═══
+        let cpHeight = getIntegerValue(this, keyCheckpointHeight(checkpointId))
+        if (height - cpHeight > maxCheckpointAge) then
+            throw("Checkpoint too old: " + (height - cpHeight).toString() + " blocks, max " + maxCheckpointAge.toString())
         else {
-            # Extract 32-byte field elements
-            let feRootLo = take(inputs, 32)
-            let feRootHi = take(drop(inputs, 32), 32)
-            let feMsgIdLo = take(drop(inputs, 64), 32)
-            let feMsgIdHi = take(drop(inputs, 96), 32)
-            let feAmount = take(drop(inputs, 128), 32)
-            let feRecipLo = take(drop(inputs, 160), 32)
-            let feRecipHi = take(drop(inputs, 192), 32)
-            let feVersion = take(drop(inputs, 224), 32)
 
-            # Reconstruct 32-byte checkpoint root from lo/hi field elements
-            let inputRoot = reconstruct256(feRootLo, feRootHi)
+        # ═══ STEP 1: RIDE RECOMPUTES MESSAGE_ID (Strategy A) ═══
+        # Defense-in-depth: caller provides all deposit fields,
+        # RIDE independently computes keccak256(canonical_preimage).
+        let localMessageId = computeMessageId(
+            srcChainId, dstChainId, srcProgramId,
+            slot, eventIndex, sender, recipient,
+            amount, nonce, assetId
+        )
+        let messageIdStr = toBase58String(localMessageId)
 
-            # Reconstruct 32-byte message_id
-            let inputMessageId = reconstruct256(feMsgIdLo, feMsgIdHi)
+        # Replay protection — BEFORE any minting
+        if (isMessageProcessed(messageIdStr)) then throw("Message already processed: " + messageIdStr)
+        else {
 
-            # FIX: ATK-2 — Extract 64-bit amount from BE field element correctly.
-            # The amount value is in the last 8 bytes of the 32-byte BE encoding.
-            let amount = fieldElementToInt(feAmount)
+        # ═══ STEP 2: EXTRACT VALUES FROM ZK PROOF PUBLIC INPUTS ═══
+        let feRootLo = take(inputs, 32)
+        let feRootHi = take(drop(inputs, 32), 32)
+        let feMsgIdLo = take(drop(inputs, 64), 32)
+        let feMsgIdHi = take(drop(inputs, 96), 32)
+        let feAmount = take(drop(inputs, 128), 32)
+        let feRecipLo = take(drop(inputs, 160), 32)
+        let feRecipHi = take(drop(inputs, 192), 32)
+        let feVersion = take(drop(inputs, 224), 32)
 
-            # Reconstruct 32-byte recipient address
-            let inputRecipient = reconstruct256(feRecipLo, feRecipHi)
+        let proofRoot = reconstruct256(feRootLo, feRootHi)
+        let proofMessageId = reconstruct256(feMsgIdLo, feMsgIdHi)
+        let proofAmount = fieldElementToInt(feAmount)
+        let proofRecipient = reconstruct256(feRecipLo, feRecipHi)
+        let proofVersion = fieldElementToInt32(feVersion)
 
-            # Extract version (should be 1, enforced by circuit)
-            let inputVersion = fieldElementToInt32(feVersion)
+        # ═══ STEP 3: CROSS-VALIDATE LOCAL vs PROOF ═══
+        # If these disagree, either the caller lied about fields or the proof
+        # was generated for different data — reject either way.
+        if (localMessageId != proofMessageId) then
+            throw("CRITICAL: local message_id disagrees with proof. Encoding mismatch or tampered fields.")
+        else if (proofAmount != amount) then
+            throw("Amount mismatch: proof=" + proofAmount.toString() + " caller=" + amount.toString())
+        else if (proofRecipient != recipient) then
+            throw("Recipient mismatch between proof and caller-provided value")
+        else {
 
-            # Verify the checkpoint root matches stored root
-            let storedRoot = getCheckpointRoot(checkpointId)
-            if (inputRoot != storedRoot) then throw("Checkpoint root mismatch")
-            else if (amount < minMintAmount) then throw("Amount below minimum")
-            else if (amount > maxSingleMint) then throw("Amount exceeds single mint limit")
-            else if (inputVersion != bridgeVersion) then throw("Version mismatch: expected " + bridgeVersion.toString())
-            else {
-                # Verify the message_id from proof matches the caller-provided string
-                if (toBase58String(inputMessageId) != messageIdStr) then
-                    throw("Message ID mismatch: proof inputs disagree with parameter")
-                else {
-                    # ═══════════════════════════════════════════════════
-                    # GROTH16 VERIFICATION — THE SECURITY ROOT
-                    # ═══════════════════════════════════════════════════
-                    let vk = getVerifyingKey()
+        # ═══ STEP 4: DOMAIN VALIDATION ═══
+        let storedRoot = getCheckpointRoot(checkpointId)
+        if (proofRoot != storedRoot) then throw("Checkpoint root mismatch")
+        else if (amount < minMintAmount) then throw("Amount below minimum: " + amount.toString())
+        else if (amount > maxSingleMint) then throw("Amount exceeds single mint limit: " + amount.toString())
+        else if (proofVersion != bridgeVersion) then
+            throw("Version mismatch: expected " + bridgeVersion.toString() + ", got " + proofVersion.toString())
+        else if (srcChainId != solChainId) then throw("Invalid source chain: expected " + solChainId.toString())
+        else if (dstChainId != dccChainId) then throw("Invalid destination chain: expected " + dccChainId.toString())
+        else {
 
-                    # groth16Verify_8inputs verifies a Groth16 proof with 8 public inputs
-                    # on the BN128 curve. This is a native RIDE v6 built-in.
-                    if (!groth16Verify_8inputs(vk, proof, inputs)) then 
-                        throw("ZK PROOF VERIFICATION FAILED — mint rejected")
-                    else {
-                        # Derive recipient address FROM THE PROOF, not from function params
-                        let recipientStr = toBase58String(inputRecipient)
-                        let recipientAddr = addressFromStringValue(recipientStr)
+        # ═══ STEP 5: GROTH16 VERIFICATION — THE SECURITY ROOT ═══
+        let vk = getVerifyingKey()
+        if (!groth16Verify_8inputs(vk, proof, inputs)) then
+            throw("ZK PROOF VERIFICATION FAILED — mint rejected")
+        else {
 
-                        # Rate limit checks
-                        let (newHourlyMinted, newHourlyResetHeight) = checkHourlyLimit(amount)
-                        let (newDailyMinted, newDailyResetHeight) = checkDailyLimit(amount)
+        # ═══ STEP 6: DERIVE RECIPIENT DCC ADDRESS ═══
+        # recipient is a 32-byte DCC public key; derive Address from it.
+        # This replaces the old addressFromStringValue which was incorrect
+        # for 32-byte public keys.
+        let recipientAddr = addressFromPublicKey(recipient)
 
-                        let wsolAssetId = getStringValue(this, keyWsolAssetId())
-                        let totalMinted = getIntegerValue(this, keyTotalMinted())
-                        let nonce = getIntegerValue(this, keyGlobalNonce())
+        # ═══ STEP 7: RATE LIMITS + ANOMALY DETECTION ═══
+        let (newHourlyMinted, newHourlyResetHeight) = checkHourlyLimit(amount)
+        let (newDailyMinted, newDailyResetHeight) = checkDailyLimit(amount)
 
-                        # Decimal conversion: Solana SOL has 9 decimals, DCC wSOL has 8
-                        let mintAmount = amount / 10
-                        if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
-                        else {
-                            # Large transaction delay
-                            if (amount >= largeTxThreshold) then {
-                                [
-                                    BooleanEntry(keyProcessedMessage(messageIdStr), true),
-                                    BooleanEntry(keyPendingLargeTx(messageIdStr), true),
-                                    IntegerEntry(keyPendingLargeTxHeight(messageIdStr), height),
-                                    StringEntry(keyPendingRecipient(messageIdStr), recipientStr),
-                                    IntegerEntry(keyPendingAmount(messageIdStr), mintAmount),
-                                    IntegerEntry(keyHourlyMinted(), newHourlyMinted),
-                                    IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
-                                    IntegerEntry(keyDailyMinted(), newDailyMinted),
-                                    IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
-                                ]
-                            }
-                            else {
-                                [
-                                    BooleanEntry(keyProcessedMessage(messageIdStr), true),
-                                    Reissue(fromBase58String(wsolAssetId).value(), mintAmount, true),
-                                    ScriptTransfer(recipientAddr, mintAmount, fromBase58String(wsolAssetId).value()),
-                                    IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
-                                    IntegerEntry(keyGlobalNonce(), nonce + 1),
-                                    IntegerEntry(keyHourlyMinted(), newHourlyMinted),
-                                    IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
-                                    IntegerEntry(keyDailyMinted(), newDailyMinted),
-                                    IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
-                                ]
-                            }
-                        }
-                    }
-                }
+        # Auto-pause if hourly volume is anomalous (>2x normal cap)
+        let shouldAutoPause = (newHourlyMinted > anomalyThresholdPerHour)
+
+        let wsolAssetId = getStringValue(this, keyWsolAssetId())
+        let totalMinted = getIntegerValue(this, keyTotalMinted())
+        let globalNonce = getIntegerValue(this, keyGlobalNonce())
+
+        # Decimal conversion: Solana SOL = 9 decimals, DCC wSOL = 8 decimals
+        let mintAmount = amount / 10
+        if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
+        else {
+            # Base entries: replay protection + full audit trail
+            let baseEntries = [
+                BooleanEntry(keyProcessedMessage(messageIdStr), true),
+                IntegerEntry(keyProcessedAt(messageIdStr), lastBlock.timestamp),
+                IntegerEntry(keyMintedAmount(messageIdStr), mintAmount),
+                IntegerEntry(keyHourlyMinted(), newHourlyMinted),
+                IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
+                IntegerEntry(keyDailyMinted(), newDailyMinted),
+                IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
+            ]
+
+            # Anomaly auto-pause entry
+            let pauseEntries = if (shouldAutoPause) then [BooleanEntry(keyPaused(), true)] else []
+
+            if (amount >= largeTxThreshold) then {
+                # Large transaction: queue for delayed execution
+                baseEntries ++ pauseEntries ++ [
+                    BooleanEntry(keyPendingLargeTx(messageIdStr), true),
+                    IntegerEntry(keyPendingLargeTxHeight(messageIdStr), height),
+                    StringEntry(keyPendingRecipient(messageIdStr), recipientAddr.toString()),
+                    IntegerEntry(keyPendingAmount(messageIdStr), mintAmount)
+                ]
             }
+            else {
+                # Immediate mint
+                baseEntries ++ pauseEntries ++ [
+                    Reissue(fromBase58String(wsolAssetId).value(), mintAmount, true),
+                    ScriptTransfer(recipientAddr, mintAmount, fromBase58String(wsolAssetId).value()),
+                    IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                    IntegerEntry(keyGlobalNonce(), globalNonce + 1)
+                ]
+            }
+        }
+
+        }
+        }
+        }
+        }
         }
     }
 }
@@ -738,10 +801,11 @@ func executePendingMint(messageIdStr: String) = {
             if (height - scheduledHeight < largeTxDelayBlocks) then
                 throw("Delay not elapsed. Wait " + (largeTxDelayBlocks - (height - scheduledHeight)).toString() + " more blocks")
             else {
-                let recipient = getStringValue(this, keyPendingRecipient(messageIdStr))
+                let recipientAddrStr = getStringValue(this, keyPendingRecipient(messageIdStr))
                 let amount = getIntegerValue(this, keyPendingAmount(messageIdStr))
                 let wsolAssetId = getStringValue(this, keyWsolAssetId())
-                let recipientAddr = addressFromStringValue(recipient)
+                # Recipient was stored as DCC Address string by verifyAndMint
+                let recipientAddr = addressFromStringValue(recipientAddrStr)
                 let totalMinted = getIntegerValue(this, keyTotalMinted())
                 let nonce = getIntegerValue(this, keyGlobalNonce())
                 
@@ -829,22 +893,29 @@ func emergencyPause() = {
     }
 }
 
+# Two-phase timelocked unpause: admin must request, then wait, then execute.
+# This prevents instant resume after a compromise triggers auto-pause.
 @Callable(i)
-func emergencyResume() = {
-    if (!isAdmin(i.caller)) then throw("Only admin can resume")
+func requestUnpause() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can request unpause")
+    else if (!isPaused()) then throw("Bridge is not paused")
     else {
-        # Timelocked unpause: admin must first request, then wait unpauseDelayBlocks
+        [IntegerEntry(keyUnpauseRequestedAt(), height)]
+    }
+}
+
+@Callable(i)
+func executeUnpause() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can execute unpause")
+    else if (!isPaused()) then throw("Bridge is not paused")
+    else {
         let requestedAt = match getInteger(this, keyUnpauseRequestedAt()) {
             case h: Int => h
-            case _ => 0
+            case _ => throw("No unpause request pending — call requestUnpause first")
         }
-        if (requestedAt == 0) then {
-            # First call: record the request, don't actually unpause yet
-            [IntegerEntry(keyUnpauseRequestedAt(), height)]
-        }
-        else if (height - requestedAt < unpauseDelayBlocks) then {
+        if (requestedAt == 0) then throw("No unpause request pending")
+        else if (height - requestedAt < unpauseDelayBlocks) then
             throw("Unpause delay not elapsed. Wait " + (unpauseDelayBlocks - (height - requestedAt)).toString() + " more blocks")
-        }
         else {
             [
                 BooleanEntry(keyPaused(), false),
@@ -924,4 +995,28 @@ func getStats() = {
         [],
         (totalMinted, totalBurned, outstanding, paused, vkSet, nextCp)
     )
+}
+
+# ═══════════════════════════════════════════════════════════════
+# VERIFIER — Prevents direct state manipulation
+# ═══════════════════════════════════════════════════════════════
+# Blocks DataTransactions entirely, forcing all state changes through
+# callable functions. This prevents the DApp deployer from directly
+# deleting processed:: entries (replay protection) or modifying
+# rate limit counters.
+
+@Verifier(tx)
+func verify() = {
+    match tx {
+        case dt: DataTransaction =>
+            # BLOCK all direct data manipulation —
+            # state changes must go through callables only.
+            # This is a key security control: processed entries
+            # can NEVER be deleted by admin.
+            false
+        case _ =>
+            # All other DApp-originated transactions (SetScript, etc.)
+            # require the DApp account's own signature.
+            sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+    }
 }
