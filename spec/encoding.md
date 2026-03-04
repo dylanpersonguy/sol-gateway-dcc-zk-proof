@@ -107,14 +107,14 @@ All integers are **little-endian** unless explicitly noted. All byte arrays are 
 
 ### 4. RIDE-Specific Constraints
 
-RIDE v6 has the following limitations affecting encoding:
+RIDE v6 has the following constraints affecting encoding:
 
-1. **No Keccak-256**: Use `blake2b256()` or `sha256()` for on-chain hashing
+1. **Keccak-256 available**: RIDE v6 provides `keccak256()` natively. The contract uses `keccak256()` for message_id computation, matching Solana and TypeScript. (`blake2b256()` and `sha256()` are also available but NOT used for message_id.)
 2. **Integer handling**: All integers are `Int` (64-bit signed). For encoding:
    - Use `toBytes(Int)` which produces 8-byte big-endian
    - Must manually convert to LE using byte extraction: `toBytes(n).drop(7).take(1)` etc.
 3. **ByteVector ops**: `+` for concatenation, `.drop(n)`, `.take(n)`, `.size()`
-4. **Max complexity**: ~26,000 complexity units. Full 181-byte preimage reconstruction + blake2b256 is feasible (~3,000 complexity)
+4. **Max complexity**: ~26,000 complexity units. Full 181-byte preimage reconstruction + keccak256 is feasible (~3,000 complexity)
 5. **Storage**: Data entries with string keys, max key length ~100 chars
 
 #### 4.1 RIDE LE Encoding Helpers
@@ -154,11 +154,11 @@ The ZK circuit (Groth16 over BN128) accepts 8 public inputs, each a BN128 scalar
 | 2 | `message_id[0..16]` | First 16 bytes of message_id as uint |
 | 3 | `message_id[16..32]` | Last 16 bytes of message_id as uint |
 | 4 | `amount` | u64 value (fits in field) |
-| 5 | `recipient_hash[0..16]` | First 16 bytes of hash(recipient) |
-| 6 | `recipient_hash[16..32]` | Last 16 bytes of hash(recipient) |
-| 7 | `expiry` | u64 Unix timestamp |
+| 5 | `recipient[0..16]` | First 16 bytes of raw recipient address |
+| 6 | `recipient[16..32]` | Last 16 bytes of raw recipient address |
+| 7 | `version` | Protocol version (must equal 1) |
 
-**Byte splitting**: 32-byte values are split into two 16-byte halves, each interpreted as a big-endian unsigned integer, to fit within the BN128 scalar field (~254 bits).
+**Byte splitting**: 32-byte values are split into two 16-byte halves, each interpreted as a little-endian unsigned 128-bit integer, to fit within the BN128 scalar field (~254 bits). This matches the `hashToFieldElements()` function in the TypeScript prover.
 
 **RIDE packing**: Use `bn256Groth16Verify(vk, proof, inputs)` where `inputs` is a concatenated byte array of 8 × 32-byte big-endian field elements.
 
@@ -189,7 +189,7 @@ This value is verified across Rust (`compute_message_id` in deposit.rs) and Type
 
 - [x] Rust encoder (`deposit.rs::compute_message_id`) — produces 181-byte preimage, Keccak-256
 - [x] TypeScript encoder (`libs/encoding-ts`) — identical preimage construction
-- [x] RIDE encoder (`zk_bridge.ride::computeMessageId`) — uses blake2b256 with identical LE helpers
+- [x] RIDE encoder (`zk_bridge.ride::computeMessageId`) — uses keccak256 with identical LE helpers
 - [x] ZK circuit public input derivation — splits message_id into field elements
 - [x] Golden test vector passes in all implementations
 - [ ] CI enforcement of cross-language equivalence
