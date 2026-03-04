@@ -418,3 +418,119 @@ fn verify_ed25519_signature_introspect(
 
     Ok(false)
 }
+
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE SCHEDULED UNLOCK — Completes a time-delayed large withdrawal
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Accounts)]
+#[instruction(transfer_id: [u8; 32])]
+pub struct ExecuteScheduledUnlock<'info> {
+    #[account(
+        mut,
+        seeds = [b"bridge_config"],
+        bump = bridge_config.bump,
+    )]
+    pub bridge_config: Account<'info, BridgeConfig>,
+
+    #[account(
+        mut,
+        seeds = [b"unlock", transfer_id.as_ref()],
+        bump = unlock_record.bump,
+        // Must not already be executed
+        constraint = !unlock_record.executed @ BridgeError::UnlockAlreadyExecuted,
+    )]
+    pub unlock_record: Account<'info, UnlockRecord>,
+
+    /// CHECK: PDA vault — source of unlocked funds
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump = bridge_config.vault_bump,
+    )]
+    pub vault: SystemAccount<'info>,
+
+    /// CHECK: Recipient receives the unlocked SOL — must match unlock_record
+    #[account(
+        mut,
+        constraint = unlock_record.recipient == recipient.key() @ BridgeError::Unauthorized,
+    )]
+    pub recipient: SystemAccount<'info>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn execute_scheduled_unlock_handler(
+    ctx: Context<ExecuteScheduledUnlock>,
+    transfer_id: [u8; 32],
+) -> Result<()> {
+    let config = &ctx.accounts.bridge_config;
+    let unlock_record = &ctx.accounts.unlock_record;
+
+    // ── GUARD: Bridge must not be paused ──
+    require!(!config.paused, BridgeError::BridgePaused);
+
+    let clock = Clock::get()?;
+
+    // ── GUARD: Timelock delay must have elapsed ──
+    require!(
+        clock.unix_timestamp >= unlock_record.scheduled_time,
+        BridgeError::WithdrawalDelayNotElapsed
+    );
+
+    let amount = unlock_record.amount;
+
+    // ── GUARD: Vault has sufficient funds ──
+    let vault_lamports = ctx.accounts.vault.lamports();
+    require!(
+        vault_lamports >= amount,
+        BridgeError::InsufficientVaultBalance
+    );
+
+    // ── Execute the transfer ──
+    let config = &mut ctx.accounts.bridge_config;
+    let vault_seeds: &[&[u8]] = &[b"vault", &[config.vault_bump]];
+    let signer_seeds = &[vault_seeds];
+
+    anchor_lang::system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            anchor_lang::system_program::Transfer {
+                from: ctx.accounts.vault.to_account_info(),
+                to: ctx.accounts.recipient.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        amount,
+    )?;
+
+    // ── Update state ──
+    config.total_unlocked = config.total_unlocked
+        .checked_add(amount)
+        .ok_or(BridgeError::ArithmeticOverflow)?;
+
+    let unlock_record = &mut ctx.accounts.unlock_record;
+    unlock_record.executed = true;
+
+    // ── Emit unlock event ──
+    emit!(BridgeUnlock {
+        transfer_id,
+        recipient: unlock_record.recipient,
+        amount,
+        burn_tx_hash: unlock_record.burn_tx_hash,
+        timestamp: clock.unix_timestamp,
+        signature_count: 0, // Already verified during initial unlock
+    });
+
+    msg!(
+        "Scheduled unlock executed: {} lamports to {}, transfer_id: {:?}",
+        amount,
+        unlock_record.recipient,
+        &transfer_id[..8]
+    );
+
+    Ok(())
+}

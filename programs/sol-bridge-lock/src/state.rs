@@ -73,8 +73,14 @@ pub struct BridgeConfig {
     /// Bump seed for the vault PDA
     pub vault_bump: u8,
 
+    /// Timestamp when resume was requested (0 = no pending request)
+    pub resume_requested_at: i64,
+
+    /// Required delay in seconds between request_resume and resume
+    pub resume_delay_seconds: i64,
+
     /// Reserved space for future fields
-    pub _reserved: [u8; 128],
+    pub _reserved: [u8; 112],
 }
 
 impl Default for BridgeConfig {
@@ -102,7 +108,9 @@ impl Default for BridgeConfig {
             solana_chain_id: 0,
             bump: 0,
             vault_bump: 0,
-            _reserved: [0u8; 128],
+            resume_requested_at: 0,
+            resume_delay_seconds: 0,
+            _reserved: [0u8; 112],
         }
     }
 }
@@ -131,7 +139,9 @@ impl BridgeConfig {
         + 4     // solana_chain_id
         + 1     // bump
         + 1     // vault_bump
-        + 128;  // reserved
+        + 8     // resume_requested_at
+        + 8     // resume_delay_seconds
+        + 112;  // reserved
 }
 
 /// ═══════════════════════════════════════════════════════════════

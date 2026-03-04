@@ -28,6 +28,8 @@ pub struct InitializeParams {
     pub dcc_chain_id: u32,
     /// Solana chain ID
     pub solana_chain_id: u32,
+    /// Resume timelock delay in seconds (minimum 300 = 5 minutes)
+    pub resume_delay_seconds: i64,
 }
 
 #[derive(Accounts)]
@@ -65,6 +67,7 @@ pub fn handler(ctx: Context<Initialize>, params: InitializeParams) -> Result<()>
     require!(params.max_deposit > params.min_deposit, BridgeError::InvalidConfig);
     require!(params.max_daily_outflow > 0, BridgeError::InvalidConfig);
     require!(params.required_confirmations >= 32, BridgeError::InvalidConfig);
+    require!(params.resume_delay_seconds >= 300, BridgeError::InvalidConfig);
 
     let config = &mut ctx.accounts.bridge_config;
     
@@ -90,7 +93,9 @@ pub fn handler(ctx: Context<Initialize>, params: InitializeParams) -> Result<()>
     config.solana_chain_id = params.solana_chain_id;
     config.bump = ctx.bumps.bridge_config;
     config.vault_bump = ctx.bumps.vault;
-    config._reserved = [0u8; 128];
+    config.resume_requested_at = 0;
+    config.resume_delay_seconds = params.resume_delay_seconds;
+    config._reserved = [0u8; 112];
 
     msg!("Bridge initialized. Authority: {}", config.authority);
     Ok(())

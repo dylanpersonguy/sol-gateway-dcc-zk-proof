@@ -61,15 +61,34 @@ pub mod sol_bridge_lock {
         instructions::unlock::handler(ctx, params)
     }
 
+    /// Execute a scheduled (large) unlock after its timelock delay has elapsed.
+    pub fn execute_scheduled_unlock(
+        ctx: Context<ExecuteScheduledUnlock>,
+        transfer_id: [u8; 32],
+    ) -> Result<()> {
+        instructions::unlock::execute_scheduled_unlock_handler(ctx, transfer_id)
+    }
+
     /// Emergency pause — halts all deposits and unlocks.
     pub fn emergency_pause(ctx: Context<EmergencyPause>) -> Result<()> {
         instructions::emergency::pause_handler(ctx)
     }
 
-    /// Resume operations after emergency pause.
-    /// Requires guardian authority.
+    /// Step 1: Request resume — starts a timelock countdown.
+    /// The bridge remains paused until resume() is called after the delay.
+    pub fn request_resume(ctx: Context<RequestResume>) -> Result<()> {
+        instructions::emergency::request_resume_handler(ctx)
+    }
+
+    /// Step 2: Execute resume after the timelock delay has elapsed.
     pub fn emergency_resume(ctx: Context<EmergencyResume>) -> Result<()> {
         instructions::emergency::resume_handler(ctx)
+    }
+
+    /// Cancel a pending resume request.
+    /// Authority or guardian can cancel — defense-in-depth.
+    pub fn cancel_resume_request(ctx: Context<CancelResumeRequest>) -> Result<()> {
+        instructions::emergency::cancel_resume_handler(ctx)
     }
 
     /// Update bridge configuration (rate limits, validator set, etc.)

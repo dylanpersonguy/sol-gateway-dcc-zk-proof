@@ -61,7 +61,7 @@
 | 5 | `slot` | u64 LE | 8 | 57 | Solana slot of the deposit transaction |
 | 6 | `event_index` | u32 LE | 4 | 65 | Event index within the slot (derived from `global_nonce`) |
 | 7 | `sender` | bytes | 32 | 69 | Depositor's Solana public key (raw 32 bytes) |
-| 8 | `recipient` | bytes | 32 | 101 | DCC recipient address (raw 32 bytes, padded if shorter) |
+| 8 | `recipient` | bytes | 32 | 101 | DCC recipient Curve25519 public key (raw 32 bytes) |
 | 9 | `amount` | u64 LE | 8 | 133 | Amount in lamports (1 SOL = 10^9 lamports) |
 | 10 | `nonce` | u64 LE | 8 | 141 | Per-user sequential nonce |
 | 11 | `asset_id` | bytes | 32 | 149 | SPL mint address or native SOL sentinel (raw 32 bytes) |
@@ -440,3 +440,4 @@ minted_amount::<message_id_base58>  = amount      (IntegerEntry — audit trail)
 | 1.1 | 2025-01-18 | Fixed FV-2 (RIDE keccak256), FV-3 (recipient encoding) |
 | 2.0 | 2025-01-20 | Full rewrite: byte layout diagrams, ZK public input packing, BN128 details, RIDE limitations, library API contract, 32 vectors with full expected values |
 | 2.1 | 2025-01-22 | Ride adaptation: Strategy A message_id recomputation, recipient=32-byte pubkey, @Verifier script, anomaly auto-pause, checkpoint freshness, enhanced storage schema, Ride complexity analysis, compensating controls |
+| 2.2 | 2025-01-24 | FV-1: Solana two-step resume flow with timelock. FV-4: max_deposit enforced at entrypoint (already present). GOAL-3: execute_scheduled_unlock instruction for delayed large withdrawals. Recipient field clarified as Curve25519 public key throughout. |

@@ -98,4 +98,16 @@ pub enum BridgeError {
     /// Transfer ID does not match expected value
     #[msg("Transfer ID mismatch — computed value differs from supplied")]
     InvalidTransferId,
+
+    /// Resume has not been requested yet
+    #[msg("Resume not requested — call request_resume first")]
+    ResumeNotRequested,
+
+    /// Resume timelock delay has not yet elapsed
+    #[msg("Resume delay not elapsed — wait for timelock")]
+    ResumeDelayNotElapsed,
+
+    /// A resume request is already pending
+    #[msg("Resume request already pending")]
+    ResumeAlreadyRequested,
 }

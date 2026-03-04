@@ -131,3 +131,23 @@ pub struct CircuitBreakerTriggered {
     /// Timestamp
     pub timestamp: i64,
 }
+
+/// Emitted when a resume is requested (starts the timelock).
+#[event]
+pub struct ResumeRequested {
+    /// Authority that requested the resume
+    pub authority: Pubkey,
+    /// When the resume was requested
+    pub requested_at: i64,
+    /// Earliest time the resume can be executed
+    pub executable_after: i64,
+}
+
+/// Emitted when a pending resume request is cancelled.
+#[event]
+pub struct ResumeCancelled {
+    /// Authority that cancelled the resume
+    pub authority: Pubkey,
+    /// Timestamp of cancellation
+    pub timestamp: i64,
+}

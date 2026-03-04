@@ -14,6 +14,7 @@ pub struct UpdateConfigParams {
     pub min_validators: Option<u8>,
     pub new_authority: Option<Pubkey>,
     pub new_guardian: Option<Pubkey>,
+    pub resume_delay_seconds: Option<i64>,
 }
 
 #[derive(Accounts)]
@@ -83,6 +84,12 @@ pub fn handler(ctx: Context<UpdateConfig>, params: UpdateConfigParams) -> Result
     if let Some(new_guardian) = params.new_guardian {
         config.guardian = new_guardian;
         msg!("Guardian transferred to: {}", new_guardian);
+    }
+
+    if let Some(resume_delay_seconds) = params.resume_delay_seconds {
+        // Minimum 5 minutes to prevent trivial bypass
+        require!(resume_delay_seconds >= 300, BridgeError::InvalidConfig);
+        config.resume_delay_seconds = resume_delay_seconds;
     }
 
     msg!("Bridge config updated");
