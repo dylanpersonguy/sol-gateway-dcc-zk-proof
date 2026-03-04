@@ -81,15 +81,16 @@ if (bal < INVOKE_ISSUE_FEE + SETSCRIPT_FEE + INVOKE_FEE * 2) {
 }
 console.log();
 
-// ── Step 1: Compile bridge_controller.ride ───────────────────────────────────
-console.log('Step 1: Compiling bridge_controller.ride...');
-const bridgeRide = readFileSync('dcc-contracts/bridge-controller/bridge_controller.ride', 'utf8');
+// ── Step 1: Compile zk_bridge.ride ─────────────────────────────────────────
+console.log('Step 1: Compiling zk_bridge.ride...');
+const RIDE_CONTRACT_PATH = process.env.DCC_RIDE_CONTRACT_PATH || 'dcc/contracts/bridge/zk_bridge.ride';
+const bridgeRide = readFileSync(RIDE_CONTRACT_PATH, 'utf8');
 const compiledBridge = await compileRide(bridgeRide);
 console.log('  OK');
 console.log();
 
-// ── Step 3: Deploy bridge_controller.ride to addr0 ───────────────────────────
-console.log('Step 3: Deploy bridge_controller.ride to', addr0);
+// ── Step 3: Deploy zk_bridge.ride to addr0 ───────────────────────────────
+console.log('Step 3: Deploy zk_bridge.ride to', addr0);
 const scriptInfo = await fetch(NODE + '/addresses/scriptInfo/' + addr0, {signal: AbortSignal.timeout(10000)}).then(r => r.json()).catch(() => null);
 const alreadyDeployed = scriptInfo && scriptInfo.scriptText && scriptInfo.scriptText !== 'base64:';
 

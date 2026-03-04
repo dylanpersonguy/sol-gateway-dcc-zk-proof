@@ -1,12 +1,12 @@
 /**
  * DCC Bridge Controller — MAINNET Deployment Script
  *
- * Deploys bridge_controller.ride to DecentralChain mainnet via
+ * Deploys zk_bridge.ride to DecentralChain mainnet via
  * https://mainnet-node.decentralchain.io
  *
  * Steps:
  *  1. Derive deployer address from DCC_VALIDATOR_SEED
- *  2. Compile bridge_controller.ride on the mainnet node
+ *  2. Compile zk_bridge.ride on the mainnet node
  *  3. SetScript tx — deploys the RIDE contract
  *  4. InvokeScript — calls initialize(guardian, minValidators)
  *  5. InvokeScript — calls registerValidator(pubKey)
@@ -43,7 +43,18 @@ const CHAIN_ID   = process.env.DCC_CHAIN_ID_CHAR || '?';
 const BASE_SEED  = required('DCC_VALIDATOR_SEED');
 const BASE_NONCE = parseInt(process.env.DCC_VALIDATOR_NONCE || '0', 10);
 
-const MIN_VALIDATORS = 1; // start with 1 for initial deployment
+const MIN_VALIDATORS = parseInt(process.env.DCC_MIN_VALIDATORS || '3', 10);
+const GUARDIAN_ADDRESS = process.env.DCC_GUARDIAN_ADDRESS || ''; // Must be set for production!
+
+// ── Production Safety Checks ─────────────────────────────────────────────────
+if (MIN_VALIDATORS < 3) {
+  console.warn('⚠️  WARNING: MIN_VALIDATORS < 3 is NOT recommended for production.');
+  console.warn('   Set DCC_MIN_VALIDATORS=3 (or higher) in your .env');
+}
+if (!GUARDIAN_ADDRESS) {
+  console.warn('⚠️  WARNING: No DCC_GUARDIAN_ADDRESS set — will use deployer as guardian.');
+  console.warn('   For production, set DCC_GUARDIAN_ADDRESS to a separate multisig address.');
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function apiGet(path) {
@@ -137,9 +148,10 @@ if (alreadyInit) {
   process.exit(0);
 }
 
-// ── STEP 1: Compile bridge_controller.ride ────────────────────────────────────
-console.log('Step 1: Compiling bridge_controller.ride on mainnet node...');
-const rideCode    = readFileSync(resolve(ROOT, 'dcc-contracts/bridge-controller/bridge_controller.ride'), 'utf8');
+// ── STEP 1: Compile zk_bridge.ride ────────────────────────────────────────────
+console.log('Step 1: Compiling zk_bridge.ride on mainnet node...');
+const RIDE_CONTRACT_PATH = process.env.DCC_RIDE_CONTRACT_PATH || 'dcc/contracts/bridge/zk_bridge.ride';
+const rideCode    = readFileSync(resolve(ROOT, RIDE_CONTRACT_PATH), 'utf8');
 const compiledB64 = await compileScript(rideCode);
 console.log('   Compiled OK —', Math.round(compiledB64.length * 3/4), 'bytes');
 
@@ -167,7 +179,7 @@ const initTx = invokeScript({
   call: {
     function: 'initialize',
     args: [
-      { type: 'string', value: deployerKeys.address },  // guardian = deployer
+      { type: 'string', value: GUARDIAN_ADDRESS || deployerKeys.address },  // guardian (env or deployer fallback)
       { type: 'integer', value: MIN_VALIDATORS },
     ],
   },

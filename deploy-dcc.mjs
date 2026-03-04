@@ -3,7 +3,7 @@
  *
  * Steps:
  *  1. Derive deployer address from DCC_VALIDATOR_SEED
- *  2. Compile bridge_controller.ride
+ *  2. Compile zk_bridge.ride
  *  3. SetScript tx — deploys the RIDE contract to deployer address
  *  4. InvokeScript tx — calls initialize(guardian, minValidators)
  *  5. InvokeScript tx — calls registerValidator(pubKey)
@@ -37,7 +37,8 @@ const CHAIN_ID   = process.env.DCC_CHAIN_ID_CHAR || '?';
 const BASE_SEED  = required('DCC_VALIDATOR_SEED');
 const BASE_NONCE = parseInt(process.env.DCC_VALIDATOR_NONCE || '0', 10);
 
-const MIN_VALIDATORS = 1; // start with 1 for testing
+const MIN_VALIDATORS = parseInt(process.env.DCC_MIN_VALIDATORS || '1', 10);
+const GUARDIAN_ADDRESS = process.env.DCC_GUARDIAN_ADDRESS || '';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function apiGet(path) {
@@ -109,9 +110,10 @@ if (alreadyInit) {
   process.exit(0);
 }
 
-// ── STEP 1: Compile bridge_controller.ride ────────────────────────────────────
-console.log('Step 1: Compiling bridge_controller.ride...');
-const rideCode    = readFileSync(resolve(ROOT, 'dcc-contracts/bridge-controller/bridge_controller.ride'), 'utf8');
+// ── STEP 1: Compile zk_bridge.ride ────────────────────────────────────────────
+console.log('Step 1: Compiling zk_bridge.ride...');
+const RIDE_CONTRACT_PATH = process.env.DCC_RIDE_CONTRACT_PATH || 'dcc/contracts/bridge/zk_bridge.ride';
+const rideCode    = readFileSync(resolve(ROOT, RIDE_CONTRACT_PATH), 'utf8');
 const compiledB64 = await compileScript(rideCode);
 console.log('   Compiled OK —', Math.round(compiledB64.length * 3/4), 'bytes');
 
@@ -139,7 +141,7 @@ const initTx = invokeScript({
   call: {
     function: 'initialize',
     args: [
-      { type: 'string', value: deployerKeys.address },  // guardian = deployer
+      { type: 'string', value: GUARDIAN_ADDRESS || deployerKeys.address },  // guardian (env or deployer fallback)
       { type: 'integer', value: MIN_VALIDATORS },
     ],
   },

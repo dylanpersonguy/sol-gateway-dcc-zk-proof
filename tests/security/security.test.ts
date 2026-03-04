@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { Keypair, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
-import * as nacl from "tweetnacl";
+import nacl from "tweetnacl";
 import { createHash } from "crypto";
 
 /* ------------------------------------------------------------------ */

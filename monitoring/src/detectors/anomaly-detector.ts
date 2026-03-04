@@ -247,6 +247,139 @@ export class AnomalyDetector extends EventEmitter {
     }
   }
 
+  /**
+   * Monitor vault depletion rate — detects rapid drainage
+   */
+  private previousVaultBalance: bigint | null = null;
+  private vaultBalanceHistory: Array<{ timestamp: number; balance: bigint }> = [];
+
+  checkVaultDepletion(currentBalance: bigint): void {
+    const now = Date.now();
+    this.vaultBalanceHistory.push({ timestamp: now, balance: currentBalance });
+
+    // Keep last hour of data
+    this.vaultBalanceHistory = this.vaultBalanceHistory.filter(
+      (entry) => now - entry.timestamp < 3600000
+    );
+
+    if (this.previousVaultBalance !== null) {
+      const drop = this.previousVaultBalance - currentBalance;
+
+      // Single-check drop > 10% of vault
+      if (drop > 0n && this.previousVaultBalance > 0n) {
+        const dropPercent = Number(drop) / Number(this.previousVaultBalance) * 100;
+        if (dropPercent > 10) {
+          this.raiseAlert({
+            id: `vault_rapid_depletion_${now}`,
+            severity: 'emergency',
+            category: 'vault_depletion',
+            message: `Vault balance dropped ${dropPercent.toFixed(1)}% in one check interval`,
+            data: {
+              previousBalance: this.previousVaultBalance.toString(),
+              currentBalance: currentBalance.toString(),
+              drop: drop.toString(),
+              dropPercent: dropPercent.toFixed(2),
+            },
+            timestamp: now,
+            autoPause: true,
+          });
+        }
+      }
+
+      // Hourly depletion rate
+      if (this.vaultBalanceHistory.length >= 2) {
+        const oldest = this.vaultBalanceHistory[0];
+        const hourlyDrop = oldest.balance - currentBalance;
+        const hoursElapsed = (now - oldest.timestamp) / 3600000;
+
+        if (hourlyDrop > 0n && hoursElapsed > 0.1) {
+          const hourlyRate = Number(hourlyDrop) / hoursElapsed;
+          const hoursUntilEmpty = currentBalance > 0n
+            ? Number(currentBalance) / hourlyRate
+            : 0;
+
+          if (hoursUntilEmpty < 24 && hoursUntilEmpty > 0) {
+            this.raiseAlert({
+              id: `vault_depletion_rate_${now}`,
+              severity: 'critical',
+              category: 'vault_depletion',
+              message: `Vault will be empty in ~${hoursUntilEmpty.toFixed(1)}h at current rate`,
+              data: {
+                currentBalance: currentBalance.toString(),
+                hourlyDrainRate: hourlyRate.toFixed(0),
+                hoursUntilEmpty: hoursUntilEmpty.toFixed(1),
+              },
+              timestamp: now,
+              autoPause: hoursUntilEmpty < 4,
+            });
+          }
+        }
+      }
+    }
+
+    this.previousVaultBalance = currentBalance;
+  }
+
+  /**
+   * Monitor for unusual outflow patterns — e.g. many unlocks in short time
+   */
+  private recentUnlocks: Array<{ timestamp: number; amount: bigint }> = [];
+
+  checkUnlockPattern(amount: bigint): void {
+    const now = Date.now();
+    this.recentUnlocks.push({ timestamp: now, amount });
+
+    // Keep last 10 minutes
+    this.recentUnlocks = this.recentUnlocks.filter(
+      (u) => now - u.timestamp < 600000
+    );
+
+    // Alert if > 10 unlocks in 10 minutes
+    if (this.recentUnlocks.length > 10) {
+      const totalVolume = this.recentUnlocks.reduce((s, u) => s + u.amount, 0n);
+      this.raiseAlert({
+        id: `unusual_outflow_${now}`,
+        severity: 'critical',
+        category: 'unusual_outflow',
+        message: `${this.recentUnlocks.length} unlocks in 10min, total ${totalVolume} lamports`,
+        data: {
+          unlockCount: this.recentUnlocks.length,
+          totalVolume: totalVolume.toString(),
+          windowMinutes: 10,
+        },
+        timestamp: now,
+        autoPause: true,
+      });
+    }
+  }
+
+  /**
+   * Monitor for bridge pause/resume events
+   */
+  checkPauseEvent(isPaused: boolean, triggeredBy: string): void {
+    if (isPaused) {
+      this.raiseAlert({
+        id: `bridge_paused_${Date.now()}`,
+        severity: 'critical',
+        category: 'pause_event',
+        message: `Bridge PAUSED by ${triggeredBy}`,
+        data: { triggeredBy, isPaused: true },
+        timestamp: Date.now(),
+        autoPause: false, // Already paused
+      });
+    } else {
+      this.raiseAlert({
+        id: `bridge_resumed_${Date.now()}`,
+        severity: 'warning',
+        category: 'pause_event',
+        message: `Bridge RESUMED by ${triggeredBy}`,
+        data: { triggeredBy, isPaused: false },
+        timestamp: Date.now(),
+        autoPause: false,
+      });
+    }
+  }
+
   private raiseAlert(alert: AnomalyAlert): void {
     this.alerts.push(alert);
     

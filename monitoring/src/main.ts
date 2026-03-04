@@ -85,7 +85,7 @@ async function main(): Promise<void> {
 
   // ── Periodic Health Checks ──
 
-  // Every 30 seconds: Check supply invariant
+  // Every 30 seconds: Check supply invariant + vault depletion
   cron.schedule('*/30 * * * * *', async () => {
     try {
       await checkSupplyInvariant(detector);
@@ -111,6 +111,23 @@ async function main(): Promise<void> {
       logger.error('Validator health check failed', { error: err });
     }
   });
+
+  // Every 30 seconds: Check bridge pause state
+  cron.schedule('*/30 * * * * *', async () => {
+    try {
+      await checkPauseState(detector);
+    } catch (err) {
+      logger.error('Pause state check failed', { error: err });
+    }
+  });
+
+  // Subscribe to Solana program logs for real-time unlock monitoring
+  try {
+    subscribeToUnlockEvents(detector);
+    logger.info('Subscribed to Solana program logs for unlock events');
+  } catch (err) {
+    logger.warn('Could not subscribe to program logs', { error: err });
+  }
 
   // ── Monitoring API ──
   const app = express();
@@ -206,6 +223,9 @@ async function checkSupplyInvariant(detector: AnomalyDetector): Promise<void> {
 
           // Run the detector's supply invariant check
           detector.checkSupplyInvariant(BigInt(vaultBalance), wsolSupply);
+
+          // Run vault depletion rate check
+          detector.checkVaultDepletion(BigInt(vaultBalance));
         }
       }
     } catch (parseErr: any) {
@@ -392,6 +412,61 @@ async function triggerEmergencyPause(alert: AnomalyAlert): Promise<void> {
   } catch (err: any) {
     logger.error('Failed to pause DCC bridge', { error: err.message });
   }
+}
+
+// ── Pause State Monitoring ──────────────────────────────────────────────────
+
+let lastPauseState: boolean | null = null;
+
+async function checkPauseState(detector: AnomalyDetector): Promise<void> {
+  try {
+    const configInfo = await solanaConnection.getAccountInfo(bridgeConfigPda);
+    if (configInfo?.data && configInfo.data.length >= 73) {
+      // paused is at offset 72 (after discriminator:8 + authority:32 + guardian:32)
+      const isPaused = configInfo.data[72] !== 0;
+
+      if (lastPauseState !== null && isPaused !== lastPauseState) {
+        detector.checkPauseEvent(isPaused, 'on-chain state change');
+      }
+      lastPauseState = isPaused;
+    }
+  } catch (err: any) {
+    logger.warn('Pause state check failed', { error: err.message });
+  }
+}
+
+// ── Solana Log Subscription for Unlock Events ───────────────────────────────
+
+function subscribeToUnlockEvents(detector: AnomalyDetector): void {
+  solanaConnection.onLogs(
+    programId,
+    (logs) => {
+      // Look for unlock-related log messages
+      for (const log of logs.logs) {
+        // Anchor events are base64-encoded in "Program data:" log lines
+        if (log.includes('Unlock executed')) {
+          // Parse amount from log if available
+          const amountMatch = log.match(/amount[:\s]+(\d+)/i);
+          const amount = amountMatch ? BigInt(amountMatch[1]) : 0n;
+          detector.checkUnlockPattern(amount);
+          detector.checkTransactionRate();
+          if (amount > 0n) {
+            detector.checkLargeTransaction(amount, logs.signature);
+            detector.checkVolumeAnomaly(amount);
+          }
+        }
+
+        if (log.includes('Emergency pause') || log.includes('emergency_pause')) {
+          detector.checkPauseEvent(true, `tx:${logs.signature}`);
+        }
+
+        if (log.includes('Resume') || log.includes('emergency_resume')) {
+          detector.checkPauseEvent(false, `tx:${logs.signature}`);
+        }
+      }
+    },
+    'confirmed',
+  );
 }
 
 main().catch((err) => {
