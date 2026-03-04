@@ -287,15 +287,23 @@ func initialize(guardian: String) = {
 # ═══════════════════════════════════════════════════════════════
 
 @Callable(i)
-func setVerifyingKey(vk: ByteVector) = {
+func setVerifyingKey(vk: ByteVector, expectedHash: ByteVector) = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
     else if (isVkSet()) then throw("Verifying key already set — immutable")
     else if (size(vk) == 0) then throw("Empty verifying key")
+    else if (size(expectedHash) != 32) then throw("Expected hash must be 32 bytes")
     else {
-        [
-            BinaryEntry(keyVerifyingKey(), vk),
-            BooleanEntry(keyVkSet(), true)
-        ]
+        # Verify the VK matches the expected hash to prevent supply-chain tampering.
+        # The deployer computes keccak256(vk) off-chain and passes it as expectedHash.
+        let actualHash = keccak256(vk)
+        if (actualHash != expectedHash) then throw("VK hash mismatch — possible tampering")
+        else {
+            [
+                BinaryEntry(keyVerifyingKey(), vk),
+                BooleanEntry(keyVkSet(), true),
+                BinaryEntry("groth16_vk_hash", actualHash)
+            ]
+        }
     }
 }
 
@@ -335,13 +343,21 @@ func registerCheckpoint(
     }
 }
 
-# Deactivate an expired checkpoint
+# Checkpoint expiration: auto-expire after ~24 hours of blocks
+let checkpointExpiryBlocks = 1440  # ~1440 blocks ≈ 24 hours
+
+# Deactivate an expired checkpoint (admin/guardian or anyone for auto-expired)
 @Callable(i)
 func deactivateCheckpoint(checkpointId: Int) = {
-    if (!isAdmin(i.caller) && !isGuardian(i.caller)) then throw("Unauthorized")
-    else if (!isCheckpointActive(checkpointId)) then throw("Checkpoint not active")
+    if (!isCheckpointActive(checkpointId)) then throw("Checkpoint not active")
     else {
-        [BooleanEntry(keyCheckpointActive(checkpointId), false)]
+        let registeredHeight = getIntegerValue(this, keyCheckpointHeight(checkpointId))
+        let isExpired = (height - registeredHeight) >= checkpointExpiryBlocks
+        if (!isAdmin(i.caller) && !isGuardian(i.caller) && !isExpired) then
+            throw("Unauthorized: checkpoint not yet expired")
+        else {
+            [BooleanEntry(keyCheckpointActive(checkpointId), false)]
+        }
     }
 }
 
@@ -367,75 +383,109 @@ func verifyAndMint(
     proof: ByteVector,
     inputs: ByteVector,
     checkpointId: Int,
-    messageIdStr: String,
-    recipientStr: String,
-    amount: Int
+    messageIdStr: String
 ) = {
     if (isPaused()) then throw("Bridge is paused")
     else if (!isVkSet()) then throw("Verifying key not set")
     else if (isMessageProcessed(messageIdStr)) then throw("Message already processed: " + messageIdStr)
-    else if (amount < minMintAmount) then throw("Amount below minimum")
-    else if (amount > maxSingleMint) then throw("Amount exceeds single mint limit")
     else if (!isCheckpointActive(checkpointId)) then throw("Checkpoint not active: " + checkpointId.toString())
     else {
-        # Verify the checkpoint root in inputs matches our stored root
-        let storedRoot = getCheckpointRoot(checkpointId)
-        let inputRoot = take(inputs, 32)
-        if (inputRoot != storedRoot) then throw("Checkpoint root mismatch")
+        # ═══════════════════════════════════════════════════════════
+        # EXTRACT ALL VALUES FROM ZK PROOF PUBLIC INPUTS
+        # Never trust function parameters for mint amount/recipient.
+        # The ZK proof's public inputs ARE the source of truth.
+        #
+        # Layout (8 × 32-byte field elements = 256 bytes total):
+        #   [0]   checkpoint_root      (32 bytes)
+        #   [1]   message_id           (32 bytes)
+        #   [2]   amount               (32 bytes, LE u64 in low 8 bytes)
+        #   [3]   recipient            (32 bytes — DCC address)
+        #   [4]   asset_id             (32 bytes)
+        #   [5]   src_chain_id         (32 bytes, LE u32 in low 4 bytes)
+        #   [6]   dst_chain_id         (32 bytes, LE u32 in low 4 bytes)
+        #   [7]   version              (32 bytes, LE u32 in low 4 bytes)
+        # ═══════════════════════════════════════════════════════════
+
+        if (size(inputs) != 256) then throw("Invalid inputs length: expected 256 bytes (8 × 32)")
         else {
-            # ═══════════════════════════════════════════════════
-            # GROTH16 VERIFICATION — THE SECURITY ROOT
-            # ═══════════════════════════════════════════════════
-            let vk = getVerifyingKey()
-            
-            # groth16Verify_8inputs verifies a Groth16 proof with 8 public inputs
-            # on the BN128 curve. This is a native RIDE v6 built-in.
-            if (!groth16Verify_8inputs(vk, proof, inputs)) then 
-                throw("ZK PROOF VERIFICATION FAILED — mint rejected")
+            # Extract fields from proof public inputs
+            let inputRoot = take(inputs, 32)
+            let inputMessageId = take(drop(inputs, 32), 32)
+            let inputAmountBytes = take(drop(inputs, 64), 32)
+            let inputRecipient = take(drop(inputs, 96), 32)
+            let inputAssetId = take(drop(inputs, 128), 32)
+            let inputSrcChainBytes = take(drop(inputs, 160), 32)
+            let inputDstChainBytes = take(drop(inputs, 192), 32)
+            let inputVersionBytes = take(drop(inputs, 224), 32)
+
+            # Parse amount from LE u64 (first 8 bytes of 32-byte field element)
+            let amountLE = take(inputAmountBytes, 8)
+            let amount = toInt(amountLE, 0)  # reads 8 bytes at offset 0 as big-endian; caller must encode LE→BE
+
+            # Verify the checkpoint root matches stored root
+            let storedRoot = getCheckpointRoot(checkpointId)
+            if (inputRoot != storedRoot) then throw("Checkpoint root mismatch")
+            else if (amount < minMintAmount) then throw("Amount below minimum")
+            else if (amount > maxSingleMint) then throw("Amount exceeds single mint limit")
             else {
-                # Verify domain separation from public inputs
-                # src_chain_id should be Solana (1), dst_chain_id should be DCC (2)
-                # (These are already constrained within the circuit, but double-check)
-                
-                # Rate limit checks
-                let (newHourlyMinted, newHourlyResetHeight) = checkHourlyLimit(amount)
-                let (newDailyMinted, newDailyResetHeight) = checkDailyLimit(amount)
-                
-                let wsolAssetId = getStringValue(this, keyWsolAssetId())
-                let recipientAddr = addressFromStringValue(recipientStr)
-                let totalMinted = getIntegerValue(this, keyTotalMinted())
-                let nonce = getIntegerValue(this, keyGlobalNonce())
-                
-                # Decimal conversion: Solana SOL has 9 decimals, DCC wSOL has 8
-                let mintAmount = amount / 10
-                if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
+                # Verify the message_id from proof matches the caller-provided string
+                if (toBase58String(inputMessageId) != messageIdStr) then
+                    throw("Message ID mismatch: proof inputs disagree with parameter")
                 else {
-                    # Large transaction delay
-                    if (amount >= largeTxThreshold) then {
-                        [
-                            BooleanEntry(keyProcessedMessage(messageIdStr), true),
-                            BooleanEntry(keyPendingLargeTx(messageIdStr), true),
-                            IntegerEntry(keyPendingLargeTxHeight(messageIdStr), height),
-                            StringEntry(keyPendingRecipient(messageIdStr), recipientStr),
-                            IntegerEntry(keyPendingAmount(messageIdStr), mintAmount),
-                            IntegerEntry(keyHourlyMinted(), newHourlyMinted),
-                            IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
-                            IntegerEntry(keyDailyMinted(), newDailyMinted),
-                            IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
-                        ]
-                    }
+                    # ═══════════════════════════════════════════════════
+                    # GROTH16 VERIFICATION — THE SECURITY ROOT
+                    # ═══════════════════════════════════════════════════
+                    let vk = getVerifyingKey()
+
+                    # groth16Verify_8inputs verifies a Groth16 proof with 8 public inputs
+                    # on the BN128 curve. This is a native RIDE v6 built-in.
+                    if (!groth16Verify_8inputs(vk, proof, inputs)) then 
+                        throw("ZK PROOF VERIFICATION FAILED — mint rejected")
                     else {
-                        [
-                            BooleanEntry(keyProcessedMessage(messageIdStr), true),
-                            Reissue(fromBase58String(wsolAssetId).value(), mintAmount, true),
-                            ScriptTransfer(recipientAddr, mintAmount, fromBase58String(wsolAssetId).value()),
-                            IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
-                            IntegerEntry(keyGlobalNonce(), nonce + 1),
-                            IntegerEntry(keyHourlyMinted(), newHourlyMinted),
-                            IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
-                            IntegerEntry(keyDailyMinted(), newDailyMinted),
-                            IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
-                        ]
+                        # Derive recipient address FROM THE PROOF, not from function params
+                        let recipientStr = toBase58String(inputRecipient)
+                        let recipientAddr = addressFromStringValue(recipientStr)
+
+                        # Rate limit checks
+                        let (newHourlyMinted, newHourlyResetHeight) = checkHourlyLimit(amount)
+                        let (newDailyMinted, newDailyResetHeight) = checkDailyLimit(amount)
+
+                        let wsolAssetId = getStringValue(this, keyWsolAssetId())
+                        let totalMinted = getIntegerValue(this, keyTotalMinted())
+                        let nonce = getIntegerValue(this, keyGlobalNonce())
+
+                        # Decimal conversion: Solana SOL has 9 decimals, DCC wSOL has 8
+                        let mintAmount = amount / 10
+                        if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
+                        else {
+                            # Large transaction delay
+                            if (amount >= largeTxThreshold) then {
+                                [
+                                    BooleanEntry(keyProcessedMessage(messageIdStr), true),
+                                    BooleanEntry(keyPendingLargeTx(messageIdStr), true),
+                                    IntegerEntry(keyPendingLargeTxHeight(messageIdStr), height),
+                                    StringEntry(keyPendingRecipient(messageIdStr), recipientStr),
+                                    IntegerEntry(keyPendingAmount(messageIdStr), mintAmount),
+                                    IntegerEntry(keyHourlyMinted(), newHourlyMinted),
+                                    IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
+                                    IntegerEntry(keyDailyMinted(), newDailyMinted),
+                                    IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
+                                ]
+                            }
+                            else {
+                                [
+                                    BooleanEntry(keyProcessedMessage(messageIdStr), true),
+                                    Reissue(fromBase58String(wsolAssetId).value(), mintAmount, true),
+                                    ScriptTransfer(recipientAddr, mintAmount, fromBase58String(wsolAssetId).value()),
+                                    IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                                    IntegerEntry(keyGlobalNonce(), nonce + 1),
+                                    IntegerEntry(keyHourlyMinted(), newHourlyMinted),
+                                    IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
+                                    IntegerEntry(keyDailyMinted(), newDailyMinted),
+                                    IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
+                                ]
+                            }
+                        }
                     }
                 }
             }

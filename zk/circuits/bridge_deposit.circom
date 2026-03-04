@@ -179,10 +179,48 @@ template BridgeDepositInclusion(TREE_DEPTH) {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // STEP 4: Constrain path_indices to be binary
+    // STEP 4: Constrain ALL bit-level inputs to binary (0 or 1)
+    // This prevents algebraic attacks using non-binary field values.
     // ═══════════════════════════════════════════════════════════
     for (var i = 0; i < TREE_DEPTH; i++) {
         path_indices[i] * (1 - path_indices[i]) === 0;
+    }
+
+    // Public input bit constraints
+    for (var i = 0; i < 256; i++) {
+        checkpoint_root[i] * (1 - checkpoint_root[i]) === 0;
+        message_id[i] * (1 - message_id[i]) === 0;
+        recipient[i] * (1 - recipient[i]) === 0;
+        asset_id[i] * (1 - asset_id[i]) === 0;
+    }
+    for (var i = 0; i < 64; i++) {
+        amount_bits[i] * (1 - amount_bits[i]) === 0;
+    }
+    for (var i = 0; i < 32; i++) {
+        src_chain_id[i] * (1 - src_chain_id[i]) === 0;
+        dst_chain_id[i] * (1 - dst_chain_id[i]) === 0;
+        version[i] * (1 - version[i]) === 0;
+    }
+
+    // Private input bit constraints
+    for (var i = 0; i < 136; i++) {
+        domain_sep[i] * (1 - domain_sep[i]) === 0;
+    }
+    for (var i = 0; i < 256; i++) {
+        src_program_id[i] * (1 - src_program_id[i]) === 0;
+        sender[i] * (1 - sender[i]) === 0;
+    }
+    for (var i = 0; i < 64; i++) {
+        slot_bits[i] * (1 - slot_bits[i]) === 0;
+        nonce_bits[i] * (1 - nonce_bits[i]) === 0;
+    }
+    for (var i = 0; i < 32; i++) {
+        event_index_bits[i] * (1 - event_index_bits[i]) === 0;
+    }
+    for (var i = 0; i < TREE_DEPTH; i++) {
+        for (var j = 0; j < 256; j++) {
+            siblings[i][j] * (1 - siblings[i][j]) === 0;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════

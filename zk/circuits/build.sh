@@ -78,13 +78,50 @@ snarkjs groth16 setup \
   "${BUILD_DIR}/${PTAU_FILE}" \
   "${BUILD_DIR}/${CIRCUIT}_0000.zkey"
 
-echo "       Adding entropy for production security..."
-echo "DCC_SOL_BRIDGE_V1_ZK_CEREMONY_$(date +%s)" | \
+# ── Multi-party ceremony contributions ─────────────────────
+# SECURITY: Use /dev/urandom for cryptographic entropy, NOT just timestamps.
+# In production, run multiple independent contributions from different
+# machines/operators. Security requires only ONE honest contributor.
+#
+# Contribution 1: Automated with cryptographic randomness
+echo "       Contribution 1: cryptographic randomness (/dev/urandom)..."
+ENTROPY_1=$(head -c 64 /dev/urandom | base64)
+echo "${ENTROPY_1}" | \
   snarkjs zkey contribute \
     "${BUILD_DIR}/${CIRCUIT}_0000.zkey" \
-    "${BUILD_DIR}/${CIRCUIT}_final.zkey" \
-    --name="DCC Bridge ZK Ceremony" \
+    "${BUILD_DIR}/${CIRCUIT}_0001.zkey" \
+    --name="DCC Bridge Ceremony - Contributor 1 (automated)" \
     -v
+
+# Contribution 2: Additional entropy source (system state + random)
+echo "       Contribution 2: additional entropy source..."
+ENTROPY_2="$(date +%s%N)_$(head -c 64 /dev/urandom | base64)_$(hostname)_$$"
+echo "${ENTROPY_2}" | \
+  snarkjs zkey contribute \
+    "${BUILD_DIR}/${CIRCUIT}_0001.zkey" \
+    "${BUILD_DIR}/${CIRCUIT}_0002.zkey" \
+    --name="DCC Bridge Ceremony - Contributor 2 (automated)" \
+    -v
+
+# Apply random beacon (public randomness from a future block hash or similar)
+# For production: use a verifiable random beacon (e.g., drand)
+echo "       Applying random beacon contribution..."
+BEACON_ENTROPY=$(head -c 32 /dev/urandom | xxd -p -c 64)
+snarkjs zkey beacon \
+  "${BUILD_DIR}/${CIRCUIT}_0002.zkey" \
+  "${BUILD_DIR}/${CIRCUIT}_final.zkey" \
+  "${BEACON_ENTROPY}" \
+  10 \
+  --name="DCC Bridge Ceremony - Final Beacon"
+
+# Clean up intermediate zkeys
+rm -f "${BUILD_DIR}/${CIRCUIT}_0000.zkey" \
+      "${BUILD_DIR}/${CIRCUIT}_0001.zkey" \
+      "${BUILD_DIR}/${CIRCUIT}_0002.zkey"
+
+echo "       Phase 2 complete: 2 contributions + beacon applied"
+echo "       NOTE: For production, add more independent contributors."
+echo "       Run: snarkjs zkey contribute <in.zkey> <out.zkey>"
 
 # ── Export verification key ─────────────────────────────────
 echo "[6/7] Exporting verification key..."

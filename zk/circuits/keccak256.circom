@@ -60,28 +60,9 @@ template AndNot() {
     out <== a * (1 - b);
 }
 
-/**
- * Keccak-f[1600] round constants (24 rounds, each 64 bits)
- * Represented as arrays of 64 bits (LSB first)
- */
-function keccak_rc(round) {
-    var rc[24][64];
-    
-    // RC[0] = 0x0000000000000001
-    rc[0][0] = 1;
-    // RC[1] = 0x0000000000008082  
-    rc[1][1] = 1; rc[1][7] = 1; rc[1][15] = 1;
-    // RC[2] = 0x800000000000808a
-    rc[2][1] = 1; rc[2][3] = 1; rc[2][7] = 1; rc[2][15] = 1; rc[2][63] = 1;
-    // RC[3] = 0x8000000080008000
-    rc[3][15] = 1; rc[3][31] = 1; rc[3][63] = 1;
-    // RC[4] = 0x000000000000808b
-    rc[4][0] = 1; rc[4][1] = 1; rc[4][3] = 1; rc[4][7] = 1; rc[4][15] = 1;
-    // ... (remaining constants follow standard Keccak spec)
-    // For brevity, only first 5 shown; full implementation uses lookup table
-    
-    return rc[round];
-}
+// NOTE: All 24 round constants are defined inline in KeccakRound template.
+// There is no separate keccak_rc() function to avoid accidental use of
+// an incomplete constant table. See KeccakRound for the complete set.
 
 /**
  * Keccak256 operating on a bit array of arbitrary length.
@@ -115,16 +96,16 @@ template Keccak256Bits(N) {
         padded[i] <== in[i];
     }
     
-    // Keccak padding: append 1, then zeros, then 1 at end of rate block
-    // The "0x06...80" domain sep for Keccak-256
-    // Bit-level: input || 0x06 padding || ... || 0x80
+    // Keccak-256 padding (NOT SHA-3-256).
+    // Ethereum/Solana use pre-FIPS Keccak-256 which pads with 0x01, not 0x06.
+    // Bit-level (LSB first): input || 1 || 0...0 || 1
+    //   First padding byte: 0x01 = LSB-first bits [1, 0, 0, 0, 0, 0, 0, 0]
+    //   Last byte of rate block: 0x80 = LSB-first bits [0, 0, 0, 0, 0, 0, 0, 1]
     if (N < PADDED_LEN) {
-        // After input: 0x06 = 00000110 in bits (LSB first: 0,1,1,0,0,0,0,0)
-        padded[N] <== 0;      // bit 0 of 0x06
-        if (N + 1 < PADDED_LEN) { padded[N+1] <== 1; }     // bit 1
-        if (N + 2 < PADDED_LEN) { padded[N+2] <== 1; }     // bit 2
-        // Fill zeros
-        for (var i = N + 3; i < PADDED_LEN - 1; i++) {
+        // After input: 0x01 = 00000001 in bits (LSB first: 1,0,0,0,0,0,0,0)
+        padded[N] <== 1;      // bit 0 of 0x01
+        // Fill zeros from N+1 to PADDED_LEN-2
+        for (var i = N + 1; i < PADDED_LEN - 1; i++) {
             padded[i] <== 0;
         }
         // Last bit of last rate block = 1 (0x80 = 10000000, LSB first: 0,0,0,0,0,0,0,1)
