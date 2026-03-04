@@ -22,7 +22,7 @@ set -euo pipefail
 CIRCUIT="bridge_deposit"
 BUILD_DIR="build"
 PTAU_FILE="powersOfTau28_hez_final_22.ptau"
-PTAU_URL="https://hermez.s3-eu-west-1.amazonaws.com/${PTAU_FILE}"
+PTAU_URL="https://storage.googleapis.com/zkevm/ptau/${PTAU_FILE}"
 
 echo "================================================================"
 echo "  DCC <-> Solana ZK Bridge — Circuit Builder (Groth16/BN128)"

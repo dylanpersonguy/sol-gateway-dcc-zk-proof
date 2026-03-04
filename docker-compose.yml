@@ -1,15 +1,35 @@
 # Docker Compose — SOL ⇄ DCC Bridge Infrastructure
-# Local development / staging deployment
+# Production deployment
 
 version: "3.9"
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-validator-common: &validator-common
+  build:
+    context: ./validator
+    dockerfile: Dockerfile
+  env_file: .env
+  restart: unless-stopped
+  networks:
+    - bridge-net
+  logging: *default-logging
+  deploy:
+    resources:
+      limits:
+        memory: 1G
+        cpus: "1.0"
+      reservations:
+        memory: 256M
 
 services:
   # ── Validator Node ─────────────────────────────────────────
   validator-1:
-    build:
-      context: ./validator
-      dockerfile: Dockerfile
-    env_file: .env
+    <<: *validator-common
     environment:
       VALIDATOR_NODE_ID: validator-1
       P2P_PORT: "9000"
@@ -21,15 +41,15 @@ services:
       - "9090:9090"   # Metrics
     volumes:
       - validator-1-data:/app/data
-    restart: unless-stopped
-    networks:
-      - bridge-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   validator-2:
-    build:
-      context: ./validator
-      dockerfile: Dockerfile
-    env_file: .env
+    <<: *validator-common
     environment:
       VALIDATOR_NODE_ID: validator-2
       P2P_PORT: "9001"
@@ -42,17 +62,18 @@ services:
       - "9091:9091"
     volumes:
       - validator-2-data:/app/data
-    restart: unless-stopped
-    networks:
-      - bridge-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
-      - validator-1
+      validator-1:
+        condition: service_healthy
 
   validator-3:
-    build:
-      context: ./validator
-      dockerfile: Dockerfile
-    env_file: .env
+    <<: *validator-common
     environment:
       VALIDATOR_NODE_ID: validator-3
       P2P_PORT: "9002"
@@ -65,12 +86,17 @@ services:
       - "9092:9092"
     volumes:
       - validator-3-data:/app/data
-    restart: unless-stopped
-    networks:
-      - bridge-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
-      - validator-1
-      - validator-2
+      validator-1:
+        condition: service_healthy
+      validator-2:
+        condition: service_healthy
 
   # ── API Server ─────────────────────────────────────────────
   api:
@@ -80,11 +106,27 @@ services:
     env_file: .env
     environment:
       API_PORT: "3000"
+      NODE_ENV: production
     ports:
       - "3000:3000"
     restart: unless-stopped
     networks:
       - bridge-net
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      validator-1:
+        condition: service_healthy
 
   # ── Monitor ────────────────────────────────────────────────
   monitor:
@@ -94,29 +136,43 @@ services:
     env_file: .env
     environment:
       MONITOR_PORT: "9095"
+      NODE_ENV: production
     ports:
       - "9095:9095"
     restart: unless-stopped
     networks:
       - bridge-net
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
 
   # ── Prometheus ─────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.51.0
     volumes:
-      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9100:9090"
     restart: unless-stopped
     networks:
       - bridge-net
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
 
   # ── Grafana ────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:10.4.0
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-changeme_in_production}
+      GF_SERVER_ROOT_URL: ${GRAFANA_URL:-http://localhost:3001}
     volumes:
       - grafana-data:/var/lib/grafana
     ports:
@@ -124,6 +180,12 @@ services:
     restart: unless-stopped
     networks:
       - bridge-net
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
     depends_on:
       - prometheus
 

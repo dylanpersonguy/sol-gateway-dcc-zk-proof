@@ -15,7 +15,7 @@ sol_bridge_lock = "9yJDb6VyjDHmQC7DLADDdLFm9wxWanXRM5x9SdZ3oVkF"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "mainnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
