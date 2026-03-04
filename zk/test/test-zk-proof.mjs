@@ -108,18 +108,39 @@ function computeMessageId(fields) {
 }
 
 function computeLeaf(messageId) {
-  return hexToBytes(keccak256(messageId));
+  // FIX ZK-M3: Domain-separated leaf hash = Keccak256(0x00 || messageId)
+  const prefixed = new Uint8Array(1 + messageId.length);
+  prefixed[0] = 0x00;
+  prefixed.set(messageId, 1);
+  return hexToBytes(keccak256(prefixed));
 }
 
 function computeEmptyLeaf() {
-  return hexToBytes(keccak256(new Uint8Array(32)));
+  // Domain-separated: Keccak256(0x00 || 0x00...00)
+  const prefixed = new Uint8Array(33);
+  prefixed[0] = 0x00;
+  return hexToBytes(keccak256(prefixed));
 }
 
 function hashPair(left, right) {
-  const combined = new Uint8Array(64);
-  combined.set(left, 0);
-  combined.set(right, 32);
+  // FIX ZK-M3: Domain-separated internal node = Keccak256(0x01 || left || right)
+  const combined = new Uint8Array(65);
+  combined[0] = 0x01;
+  combined.set(left, 1);
+  combined.set(right, 33);
   return hexToBytes(keccak256(combined));
+}
+
+/**
+ * Convert bytes to little-endian BigInt (for field element packing).
+ * FIX ZK-H2: Used to pack 16-byte halves of 32-byte hashes into BN128 field elements.
+ */
+function bytesToLEBigInt(bytes) {
+  let result = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    result = (result << 8n) | BigInt(bytes[i]);
+  }
+  return result;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -653,63 +674,74 @@ function testFullBridgeWitness() {
   const proof = tree.getProof(2);
   const root = tree.getRoot();
 
-  // Build the full circuit input (same format as the real prover)
+  // Build the full circuit input (new field-element format per ZK-H2 fix)
   const domainSepBytes = new TextEncoder().encode(DOMAIN_SEP);
-  const circuitInput = {
-    // Public inputs
-    checkpoint_root: bytesToBitsLE(root),
-    message_id: bytesToBitsLE(messageId),
-    amount_bits: numberToBitsLE(fields.amount, 64),
-    recipient: bytesToBitsLE(fields.recipient),
-    asset_id: bytesToBitsLE(fields.assetId),
-    src_chain_id: numberToBitsLE(fields.srcChainId, 32),
-    dst_chain_id: numberToBitsLE(fields.dstChainId, 32),
-    version: numberToBitsLE(BRIDGE_VERSION, 32),
 
-    // Private inputs
+  // FIX ZK-H2: Pack 256-bit hashes into two 128-bit field elements (lo, hi)
+  const rootLo = bytesToLEBigInt(root.slice(0, 16));
+  const rootHi = bytesToLEBigInt(root.slice(16, 32));
+  const msgIdLo = bytesToLEBigInt(messageId.slice(0, 16));
+  const msgIdHi = bytesToLEBigInt(messageId.slice(16, 32));
+  const recipLo = bytesToLEBigInt(fields.recipient.slice(0, 16));
+  const recipHi = bytesToLEBigInt(fields.recipient.slice(16, 32));
+
+  const circuitInput = {
+    // Public inputs — 8 field elements for groth16Verify_8inputs
+    checkpoint_root_lo: rootLo.toString(),
+    checkpoint_root_hi: rootHi.toString(),
+    message_id_lo: msgIdLo.toString(),
+    message_id_hi: msgIdHi.toString(),
+    amount: fields.amount.toString(),
+    recipient_lo: recipLo.toString(),
+    recipient_hi: recipHi.toString(),
+    version: BRIDGE_VERSION.toString(),
+
+    // Private inputs (bit arrays — internal decomposition handled by circuit)
     domain_sep: bytesToBitsLE(domainSepBytes),
     src_program_id: bytesToBitsLE(fields.srcProgramId),
     slot_bits: numberToBitsLE(fields.slot, 64),
     event_index_bits: numberToBitsLE(fields.eventIndex, 32),
     sender: bytesToBitsLE(fields.sender),
     nonce_bits: numberToBitsLE(fields.nonce, 64),
+    asset_id: bytesToBitsLE(fields.assetId),
+    src_chain_id: numberToBitsLE(fields.srcChainId, 32),
+    dst_chain_id: numberToBitsLE(fields.dstChainId, 32),
     siblings: proof.siblings.map(s => bytesToBitsLE(s)),
     path_indices: proof.pathIndices,
   };
 
-  // Validate dimensions
-  assert(circuitInput.checkpoint_root.length === 256, 'checkpoint_root: 256 bits');
-  assert(circuitInput.message_id.length === 256, 'message_id: 256 bits');
-  assert(circuitInput.amount_bits.length === 64, 'amount_bits: 64 bits');
-  assert(circuitInput.recipient.length === 256, 'recipient: 256 bits');
-  assert(circuitInput.asset_id.length === 256, 'asset_id: 256 bits');
-  assert(circuitInput.src_chain_id.length === 32, 'src_chain_id: 32 bits');
-  assert(circuitInput.dst_chain_id.length === 32, 'dst_chain_id: 32 bits');
-  assert(circuitInput.version.length === 32, 'version: 32 bits');
+  // Validate public inputs are valid field element strings
+  assert(BigInt(circuitInput.checkpoint_root_lo) < (1n << 128n), 'checkpoint_root_lo fits in 128 bits');
+  assert(BigInt(circuitInput.checkpoint_root_hi) < (1n << 128n), 'checkpoint_root_hi fits in 128 bits');
+  assert(BigInt(circuitInput.message_id_lo) < (1n << 128n), 'message_id_lo fits in 128 bits');
+  assert(BigInt(circuitInput.message_id_hi) < (1n << 128n), 'message_id_hi fits in 128 bits');
+  assert(BigInt(circuitInput.amount) < (1n << 64n), 'amount fits in 64 bits');
+  assert(BigInt(circuitInput.recipient_lo) < (1n << 128n), 'recipient_lo fits in 128 bits');
+  assert(BigInt(circuitInput.recipient_hi) < (1n << 128n), 'recipient_hi fits in 128 bits');
+  assert(circuitInput.version === '1', 'version = 1');
+
+  // Validate private bit-array dimensions
   assert(circuitInput.domain_sep.length === 136, 'domain_sep: 136 bits (17 bytes)');
   assert(circuitInput.src_program_id.length === 256, 'src_program_id: 256 bits');
   assert(circuitInput.slot_bits.length === 64, 'slot_bits: 64 bits');
   assert(circuitInput.event_index_bits.length === 32, 'event_index_bits: 32 bits');
   assert(circuitInput.sender.length === 256, 'sender: 256 bits');
   assert(circuitInput.nonce_bits.length === 64, 'nonce_bits: 64 bits');
+  assert(circuitInput.asset_id.length === 256, 'asset_id: 256 bits');
+  assert(circuitInput.src_chain_id.length === 32, 'src_chain_id: 32 bits');
+  assert(circuitInput.dst_chain_id.length === 32, 'dst_chain_id: 32 bits');
   assert(circuitInput.siblings.length === DEPTH, `siblings: ${DEPTH} arrays`);
   assert(circuitInput.siblings.every(s => s.length === 256), 'Each sibling: 256 bits');
   assert(circuitInput.path_indices.length === DEPTH, `path_indices: ${DEPTH} values`);
   assert(circuitInput.path_indices.every(p => p === 0 || p === 1), 'Path indices: all binary');
 
-  // All bits should be 0 or 1
-  const allBits = [
-    ...circuitInput.checkpoint_root,
-    ...circuitInput.message_id,
-    ...circuitInput.amount_bits,
-    ...circuitInput.domain_sep,
-    ...circuitInput.version,
-  ];
-  assert(allBits.every(b => b === 0 || b === 1), 'All bit values are 0 or 1');
-
-  // Version constraint check: version[0]=1, rest=0
-  assert(circuitInput.version[0] === 1, 'version[0] = 1 (circuit constraint)');
-  assert(circuitInput.version.slice(1).every(b => b === 0), 'version[1..31] = 0 (circuit constraint)');
+  // Verify field element packing round-trip
+  // Reconstruct root from lo/hi and compare
+  const reconstructedRootBytes = new Uint8Array(32);
+  let lo = rootLo, hi = rootHi;
+  for (let i = 0; i < 16; i++) { reconstructedRootBytes[i] = Number(lo & 0xffn); lo >>= 8n; }
+  for (let i = 0; i < 16; i++) { reconstructedRootBytes[16 + i] = Number(hi & 0xffn); hi >>= 8n; }
+  assert(bytesToHex(reconstructedRootBytes) === bytesToHex(root), 'Field element packing round-trip: root ↔ (lo, hi)');
 
   // Preimage total bits check: 1448 bits = 181 bytes
   const totalPreimageBits = 136 + 32 + 32 + 256 + 64 + 32 + 256 + 256 + 64 + 64 + 256;

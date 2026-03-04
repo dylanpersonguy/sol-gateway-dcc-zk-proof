@@ -1,0 +1,29 @@
+# ZK Build Artifacts — do not commit
+# FIX: ZK-L4 — Exclude large binary build outputs from VCS
+
+# Powers of Tau ceremony files
+*.ptau
+
+# Groth16 proving/verification keys
+*.zkey
+
+# Compiled circuit files
+*.wasm
+*.r1cs
+*.sym
+*.json
+!package.json
+!tsconfig.json
+
+# snarkjs intermediate files
+*.wtns
+
+# Build output directories
+build/
+!build/.gitkeep
+
+# C++ witness generator (if compiled)
+*_cpp/
+
+# Node modules (if any)
+node_modules/

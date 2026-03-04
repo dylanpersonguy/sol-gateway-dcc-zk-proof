@@ -23,6 +23,7 @@ import {
   numberToBitsLE,
   bytesToHex,
   hexToBytes,
+  hashToFieldElements,
   DOMAIN_SEP,
   MERKLE_TREE_DEPTH,
 } from './message.js';
@@ -179,7 +180,12 @@ export class BridgeProver {
   }
 
   /**
-   * Build the circuit input (all signals as arrays of bits/field elements)
+   * Build the circuit input (field-element public inputs + bit-array privates)
+   *
+   * FIX: ZK-H2 — Public inputs are now 8 field elements (not bit arrays).
+   * 256-bit hashes are split into lo/hi 128-bit field elements.
+   * src_chain_id, dst_chain_id, and asset_id become private bit arrays
+   * (they are cryptographically bound through the message_id hash).
    */
   private buildCircuitInput(
     fields: MessageFields,
@@ -188,25 +194,31 @@ export class BridgeProver {
     merkleProof: MerkleProof
   ): Record<string, any> {
     const domainSepBytes = new TextEncoder().encode(DOMAIN_SEP);
+    const rootFE = hashToFieldElements(checkpointRoot);
+    const msgIdFE = hashToFieldElements(messageId);
+    const recipFE = hashToFieldElements(fields.recipient);
 
     return {
-      // Public inputs
-      checkpoint_root: bytesToBitsLE(checkpointRoot),
-      message_id: bytesToBitsLE(messageId),
-      amount_bits: numberToBitsLE(fields.amount, 64),
-      recipient: bytesToBitsLE(fields.recipient),
-      asset_id: bytesToBitsLE(fields.assetId),
-      src_chain_id: numberToBitsLE(fields.srcChainId, 32),
-      dst_chain_id: numberToBitsLE(fields.dstChainId, 32),
-      version: numberToBitsLE(1, 32),
+      // Public inputs — 8 field elements for groth16Verify_8inputs
+      checkpoint_root_lo: rootFE.lo.toString(),
+      checkpoint_root_hi: rootFE.hi.toString(),
+      message_id_lo: msgIdFE.lo.toString(),
+      message_id_hi: msgIdFE.hi.toString(),
+      amount: fields.amount.toString(),
+      recipient_lo: recipFE.lo.toString(),
+      recipient_hi: recipFE.hi.toString(),
+      version: '1',
 
-      // Private inputs
+      // Private inputs (bit arrays)
       domain_sep: bytesToBitsLE(domainSepBytes),
       src_program_id: bytesToBitsLE(fields.srcProgramId),
       slot_bits: numberToBitsLE(fields.slot, 64),
       event_index_bits: numberToBitsLE(fields.eventIndex, 32),
       sender: bytesToBitsLE(fields.sender),
       nonce_bits: numberToBitsLE(fields.nonce, 64),
+      asset_id: bytesToBitsLE(fields.assetId),
+      src_chain_id: numberToBitsLE(fields.srcChainId, 32),
+      dst_chain_id: numberToBitsLE(fields.dstChainId, 32),
       siblings: merkleProof.siblings.map((s) => bytesToBitsLE(s)),
       path_indices: merkleProof.pathIndices,
     };

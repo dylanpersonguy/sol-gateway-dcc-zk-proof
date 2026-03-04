@@ -138,6 +138,41 @@ func getCheckpointRoot(id: Int) = {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# BYTE REVERSAL & FIELD ELEMENT HELPERS
+# ═══════════════════════════════════════════════════════════════
+# FIX: ZK-H2/ATK-2 — Reconstruct 256-bit hashes from two 128-bit
+# BN128 field elements. Each field element is 32-byte big-endian.
+# The 128-bit value occupies the last 16 bytes (bytes 16..31).
+# Original hash bytes are in little-endian order relative to the
+# field element, so we reverse the 16 extracted bytes.
+
+func reverseBytes16(bv: ByteVector) = {
+    take(drop(bv, 15), 1) + take(drop(bv, 14), 1) + take(drop(bv, 13), 1) +
+    take(drop(bv, 12), 1) + take(drop(bv, 11), 1) + take(drop(bv, 10), 1) +
+    take(drop(bv, 9), 1) + take(drop(bv, 8), 1) + take(drop(bv, 7), 1) +
+    take(drop(bv, 6), 1) + take(drop(bv, 5), 1) + take(drop(bv, 4), 1) +
+    take(drop(bv, 3), 1) + take(drop(bv, 2), 1) + take(drop(bv, 1), 1) +
+    take(bv, 1)
+}
+
+# Reconstruct a 32-byte hash from two 128-bit field elements (each 32 bytes BE)
+func reconstruct256(feLo: ByteVector, feHi: ByteVector) = {
+    reverseBytes16(drop(feLo, 16)) + reverseBytes16(drop(feHi, 16))
+}
+
+# Extract a 64-bit integer from a 32-byte BE field element.
+# FIX: ATK-2 — The integer value is in the last 8 bytes of the
+# big-endian encoding. toInt reads 8 bytes at the given offset as BE i64.
+func fieldElementToInt(fe: ByteVector) = {
+    toInt(fe, 24)
+}
+
+# Extract a 32-bit integer from a 32-byte BE field element.
+func fieldElementToInt32(fe: ByteVector) = {
+    toInt(fe, 24)
+}
+
+# ═══════════════════════════════════════════════════════════════
 # LITTLE-ENDIAN BYTE ENCODING HELPERS
 # ═══════════════════════════════════════════════════════════════
 # RIDE's toBytes(Int) produces 8-byte BIG-endian. The canonical
@@ -192,7 +227,12 @@ func computeMessageId(
     else if (size(recipient) != 32) then throw("recipient must be 32 bytes")
     else if (size(assetId) != 32) then throw("assetId must be 32 bytes")
     else {
-        let preimage = toBytes(domainSeparator) +  # 17 bytes (ASCII, no length prefix via toBytes(String) in RIDE v6 = UTF-8 bytes)
+        let domainBytes = toBytes(domainSeparator)
+        # FIX: ZK-M4 — Runtime assertion that toBytes(String) returns raw UTF-8
+        # without a length prefix. If RIDE behavior changes, this catches it.
+        if (size(domainBytes) != 17) then throw("Domain separator encoding error: expected 17 bytes, got " + size(domainBytes).toString())
+        else {
+        let preimage = domainBytes +                       # 17 bytes (UTF-8, verified no length prefix)
             intToLE4(srcChainId) +                  # 4 bytes LE
             intToLE4(dstChainId) +                  # 4 bytes LE
             srcProgramId +                          # 32 bytes
@@ -205,6 +245,7 @@ func computeMessageId(
             assetId                                 # 32 bytes
         # Total: 17 + 4 + 4 + 32 + 8 + 4 + 32 + 32 + 8 + 8 + 32 = 181 bytes
         keccak256(preimage)
+        }
     }
 }
 
@@ -368,15 +409,15 @@ func deactivateCheckpoint(checkpointId: Int) = {
 # Accepts a Groth16 proof and mints wSOL if it verifies.
 # NO multisig. The ZK proof IS the authority.
 #
-# Public inputs (encoded in `inputs` ByteVector):
-#   [0] checkpoint_root (32 bytes)
-#   [1] message_id (32 bytes)
-#   [2] amount (8 bytes LE)
-#   [3] recipient (32 bytes — DCC address)
-#   [4] asset_id (32 bytes)
-#   [5] src_chain_id (4 bytes LE)
-#   [6] dst_chain_id (4 bytes LE)
-#   [7] version (4 bytes LE)
+# FIX: ZK-H2 — Public inputs are now 8 field elements (each 32 bytes BE):
+#   [0] checkpoint_root_lo  (128-bit, lower half of root hash)
+#   [1] checkpoint_root_hi  (128-bit, upper half of root hash)
+#   [2] message_id_lo       (128-bit, lower half of message_id)
+#   [3] message_id_hi       (128-bit, upper half of message_id)
+#   [4] amount              (64-bit transfer amount)
+#   [5] recipient_lo        (128-bit, lower half of recipient address)
+#   [6] recipient_hi        (128-bit, upper half of recipient address)
+#   [7] version             (32-bit protocol version)
 
 @Callable(i)
 func verifyAndMint(
@@ -392,41 +433,45 @@ func verifyAndMint(
     else {
         # ═══════════════════════════════════════════════════════════
         # EXTRACT ALL VALUES FROM ZK PROOF PUBLIC INPUTS
-        # Never trust function parameters for mint amount/recipient.
-        # The ZK proof's public inputs ARE the source of truth.
-        #
-        # Layout (8 × 32-byte field elements = 256 bytes total):
-        #   [0]   checkpoint_root      (32 bytes)
-        #   [1]   message_id           (32 bytes)
-        #   [2]   amount               (32 bytes, LE u64 in low 8 bytes)
-        #   [3]   recipient            (32 bytes — DCC address)
-        #   [4]   asset_id             (32 bytes)
-        #   [5]   src_chain_id         (32 bytes, LE u32 in low 4 bytes)
-        #   [6]   dst_chain_id         (32 bytes, LE u32 in low 4 bytes)
-        #   [7]   version              (32 bytes, LE u32 in low 4 bytes)
+        # FIX: ZK-H2/ATK-1 — 8 field elements × 32 bytes = 256 bytes
+        # FIX: ATK-2 — Correct byte-order parsing for amounts
+        # FIX: ZK-H3 — All values extracted FROM proof, not function params
         # ═══════════════════════════════════════════════════════════
 
         if (size(inputs) != 256) then throw("Invalid inputs length: expected 256 bytes (8 × 32)")
         else {
-            # Extract fields from proof public inputs
-            let inputRoot = take(inputs, 32)
-            let inputMessageId = take(drop(inputs, 32), 32)
-            let inputAmountBytes = take(drop(inputs, 64), 32)
-            let inputRecipient = take(drop(inputs, 96), 32)
-            let inputAssetId = take(drop(inputs, 128), 32)
-            let inputSrcChainBytes = take(drop(inputs, 160), 32)
-            let inputDstChainBytes = take(drop(inputs, 192), 32)
-            let inputVersionBytes = take(drop(inputs, 224), 32)
+            # Extract 32-byte field elements
+            let feRootLo = take(inputs, 32)
+            let feRootHi = take(drop(inputs, 32), 32)
+            let feMsgIdLo = take(drop(inputs, 64), 32)
+            let feMsgIdHi = take(drop(inputs, 96), 32)
+            let feAmount = take(drop(inputs, 128), 32)
+            let feRecipLo = take(drop(inputs, 160), 32)
+            let feRecipHi = take(drop(inputs, 192), 32)
+            let feVersion = take(drop(inputs, 224), 32)
 
-            # Parse amount from LE u64 (first 8 bytes of 32-byte field element)
-            let amountLE = take(inputAmountBytes, 8)
-            let amount = toInt(amountLE, 0)  # reads 8 bytes at offset 0 as big-endian; caller must encode LE→BE
+            # Reconstruct 32-byte checkpoint root from lo/hi field elements
+            let inputRoot = reconstruct256(feRootLo, feRootHi)
+
+            # Reconstruct 32-byte message_id
+            let inputMessageId = reconstruct256(feMsgIdLo, feMsgIdHi)
+
+            # FIX: ATK-2 — Extract 64-bit amount from BE field element correctly.
+            # The amount value is in the last 8 bytes of the 32-byte BE encoding.
+            let amount = fieldElementToInt(feAmount)
+
+            # Reconstruct 32-byte recipient address
+            let inputRecipient = reconstruct256(feRecipLo, feRecipHi)
+
+            # Extract version (should be 1, enforced by circuit)
+            let inputVersion = fieldElementToInt32(feVersion)
 
             # Verify the checkpoint root matches stored root
             let storedRoot = getCheckpointRoot(checkpointId)
             if (inputRoot != storedRoot) then throw("Checkpoint root mismatch")
             else if (amount < minMintAmount) then throw("Amount below minimum")
             else if (amount > maxSingleMint) then throw("Amount exceeds single mint limit")
+            else if (inputVersion != bridgeVersion) then throw("Version mismatch: expected " + bridgeVersion.toString())
             else {
                 # Verify the message_id from proof matches the caller-provided string
                 if (toBase58String(inputMessageId) != messageIdStr) then

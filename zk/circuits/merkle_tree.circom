@@ -42,6 +42,10 @@ template DualMux256() {
 /**
  * Single level of Merkle proof verification.
  * Hashes current node with sibling, ordering determined by path_index.
+ *
+ * FIX: ZK-M3 — Domain-separated internal node hash (RFC 6962 §2.1)
+ * Hash = Keccak256(0x01 || left || right) — 520 bits input
+ * The 0x01 prefix distinguishes internal nodes from leaves (0x00 prefix).
  */
 template MerkleLevel() {
     signal input current[256];
@@ -57,13 +61,21 @@ template MerkleLevel() {
     }
     mux.selector <== path_index;
     
-    // Hash(left || right) — 512 bits input → 256 bits output
-    component hasher = Keccak256Bits(512);
-    for (var i = 0; i < 256; i++) {
-        hasher.in[i] <== mux.out_left[i];
+    // Hash(0x01 || left || right) — 520 bits input → 256 bits output
+    // 0x01 in LSB-first bits = [1, 0, 0, 0, 0, 0, 0, 0]
+    component hasher = Keccak256Bits(520);
+    // 0x01 domain prefix (8 bits)
+    hasher.in[0] <== 1;
+    for (var i = 1; i < 8; i++) {
+        hasher.in[i] <== 0;
     }
+    // left child (256 bits)
     for (var i = 0; i < 256; i++) {
-        hasher.in[256 + i] <== mux.out_right[i];
+        hasher.in[8 + i] <== mux.out_left[i];
+    }
+    // right child (256 bits)
+    for (var i = 0; i < 256; i++) {
+        hasher.in[264 + i] <== mux.out_right[i];
     }
     
     for (var i = 0; i < 256; i++) {

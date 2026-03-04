@@ -130,10 +130,15 @@ export function computeMessageId(fields: MessageFields): Uint8Array {
 }
 
 /**
- * Compute the Merkle leaf: leaf = Keccak256(message_id)
+ * Compute the Merkle leaf: leaf = Keccak256(0x00 || message_id)
+ * FIX: ZK-M3 — Domain-separated leaf hash (RFC 6962 §2.1)
+ * 0x00 prefix distinguishes leaves from internal nodes (0x01)
  */
 export function computeLeaf(messageId: Uint8Array): Uint8Array {
-  const hashHex = keccak256(messageId);
+  const prefixed = new Uint8Array(1 + messageId.length);
+  prefixed[0] = 0x00;  // leaf domain separator
+  prefixed.set(messageId, 1);
+  const hashHex = keccak256(prefixed);
   return hexToBytes(hashHex);
 }
 
@@ -147,12 +152,15 @@ export function computeEmptyLeaf(): Uint8Array {
 }
 
 /**
- * Compute Keccak256(left || right) for Merkle tree inner nodes
+ * Compute Keccak256(0x01 || left || right) for Merkle tree inner nodes
+ * FIX: ZK-M3 — Domain-separated node hash (RFC 6962 §2.1)
+ * 0x01 prefix distinguishes internal nodes from leaves (0x00)
  */
 export function hashPair(left: Uint8Array, right: Uint8Array): Uint8Array {
-  const combined = new Uint8Array(64);
-  combined.set(left, 0);
-  combined.set(right, 32);
+  const combined = new Uint8Array(1 + 64);
+  combined[0] = 0x01;  // internal node domain separator
+  combined.set(left, 1);
+  combined.set(right, 33);
   const hashHex = keccak256(combined);
   return hexToBytes(hashHex);
 }
@@ -199,4 +207,34 @@ export function numberToBitsLE(value: bigint | number, width: number): number[] 
     bits.push(Number((v >> BigInt(i)) & 1n));
   }
   return bits;
+}
+
+/**
+ * Convert a byte array (first `len` bytes) to a BigInt interpreting as little-endian.
+ * Used to split 256-bit hashes into two 128-bit field elements.
+ *
+ * FIX: ZK-H2 — Field-element public input packing
+ */
+export function bytesToLEBigInt(bytes: Uint8Array): bigint {
+  let val = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    val = (val << 8n) | BigInt(bytes[i]);
+  }
+  return val;
+}
+
+/**
+ * Split a 256-bit hash into two 128-bit field elements (lo, hi).
+ *
+ * lo = LE-interpret(hash[0..15])
+ * hi = LE-interpret(hash[16..31])
+ *
+ * Both values are < 2^128 and always fit in the BN128 scalar field.
+ */
+export function hashToFieldElements(hash: Uint8Array): { lo: bigint; hi: bigint } {
+  if (hash.length !== 32) throw new Error(`Expected 32-byte hash, got ${hash.length}`);
+  return {
+    lo: bytesToLEBigInt(hash.slice(0, 16)),
+    hi: bytesToLEBigInt(hash.slice(16, 32)),
+  };
 }
