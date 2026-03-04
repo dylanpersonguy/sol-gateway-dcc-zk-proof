@@ -1,0 +1,114 @@
+name: Encoding Equivalence
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'libs/encoding-ts/**'
+      - 'libs/encoding-rust/**'
+      - 'spec/test-vectors.json'
+      - 'spec/encoding.md'
+  pull_request:
+    paths:
+      - 'libs/encoding-ts/**'
+      - 'libs/encoding-rust/**'
+      - 'spec/test-vectors.json'
+      - 'spec/encoding.md'
+
+jobs:
+  typescript-tests:
+    name: TypeScript Encoding Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Run encoding tests (222 vectors)
+        run: npx vitest run libs/encoding-ts/tests/encoding.test.ts
+
+  rust-tests:
+    name: Rust Encoding Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-encoding-${{ hashFiles('libs/encoding-rust/Cargo.toml') }}
+
+      - name: Run encoding tests
+        run: cargo test -p bridge-encoding --verbose
+
+  cross-language-golden:
+    name: Cross-Language Golden Vector
+    needs: [typescript-tests, rust-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Extract golden vector from JSON
+        id: golden
+        run: |
+          GOLDEN=$(node -e "
+            const v = require('./spec/test-vectors.json').vectors[0];
+            console.log(v.expected_message_id);
+          ")
+          echo "hash=$GOLDEN" >> "$GITHUB_OUTPUT"
+          echo "Golden hash: $GOLDEN"
+
+      - name: Verify TypeScript produces golden hash
+        run: |
+          TS_HASH=$(node -e "
+            const { encodeDepositMessage, hashMessage, hexToBytes, bytesToHex } = require('./libs/encoding-ts/index.ts');
+          " 2>/dev/null || node --loader ts-node/esm -e "
+            import { encodeDepositMessage, hashMessage, hexToBytes, bytesToHex } from './libs/encoding-ts/index.ts';
+            const v = JSON.parse(require('fs').readFileSync('./spec/test-vectors.json', 'utf8')).vectors[0];
+            const env = {
+              domainSep: v.fields.domain_sep,
+              srcChainId: v.fields.src_chain_id,
+              dstChainId: v.fields.dst_chain_id,
+              srcProgramId: hexToBytes(v.fields.src_program_id),
+              slot: BigInt(v.fields.slot),
+              eventIndex: v.fields.event_index,
+              sender: hexToBytes(v.fields.sender),
+              recipient: hexToBytes(v.fields.recipient),
+              amount: BigInt(v.fields.amount),
+              nonce: BigInt(v.fields.nonce),
+              assetId: hexToBytes(v.fields.asset_id),
+            };
+            console.log(bytesToHex(hashMessage(encodeDepositMessage(env))));
+          ")
+          echo "TypeScript golden: $TS_HASH"
+          echo "Expected:          ${{ steps.golden.outputs.hash }}"
+          [ "$TS_HASH" = "${{ steps.golden.outputs.hash }}" ] || { echo "MISMATCH!"; exit 1; }
+
+      - name: Verify Rust produces golden hash
+        run: |
+          RUST_HASH=$(cargo test -p bridge-encoding test_golden_vector_v001 2>&1 | grep -o "test .* ok" | head -1)
+          echo "Rust golden vector test: $RUST_HASH"
+          cargo test -p bridge-encoding test_golden_vector_v001
+
+      - name: Equivalence confirmed
+        run: echo "✅ All implementations agree on golden vector ${{ steps.golden.outputs.hash }}"

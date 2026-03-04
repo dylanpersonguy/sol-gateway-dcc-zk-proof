@@ -417,6 +417,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridge-encoding"
+version = "1.0.0"
+dependencies = [
+ "serde_json",
+ "sha3",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

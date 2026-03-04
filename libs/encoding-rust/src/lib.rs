@@ -110,6 +110,23 @@ pub fn hash_message(preimage: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Compute leaf hash = Keccak256(0x00 || message_id).
+/// RFC 6962 §2.1 domain separation for Merkle leaves.
+pub fn compute_leaf_hash(message_id: &[u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 33];
+    buf[0] = 0x00;
+    buf[1..33].copy_from_slice(message_id);
+    hash_message(&buf)
+}
+
+/// Split a 32-byte value into two 128-bit LE unsigned integers [lo, hi].
+/// bytes[0..16] → lo (LE u128), bytes[16..32] → hi (LE u128).
+pub fn split_to_128(bytes: &[u8; 32]) -> (u128, u128) {
+    let lo = u128::from_le_bytes(bytes[0..16].try_into().unwrap());
+    let hi = u128::from_le_bytes(bytes[16..32].try_into().unwrap());
+    (lo, hi)
+}
+
 /// Convenience: compute deposit message_id in one call.
 pub fn compute_deposit_message_id(env: &DepositEnvelope) -> [u8; 32] {
     let preimage = encode_deposit_message(env);
@@ -138,50 +155,247 @@ pub fn hex_to_bytes32(hex: &str) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use std::fs;
+
+    fn load_vectors() -> Vec<Value> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/test-vectors.json");
+        let data = fs::read_to_string(path).expect("Cannot read test-vectors.json");
+        let json: Value = serde_json::from_str(&data).expect("Invalid JSON");
+        json["vectors"].as_array().unwrap().clone()
+    }
+
+    fn build_deposit_envelope(fields: &Value) -> DepositEnvelope {
+        DepositEnvelope {
+            domain_sep: fields["domain_sep"].as_str().unwrap().as_bytes().to_vec(),
+            src_chain_id: fields["src_chain_id"].as_u64().unwrap() as u32,
+            dst_chain_id: fields["dst_chain_id"].as_u64().unwrap() as u32,
+            src_program_id: hex_to_bytes32(fields["src_program_id"].as_str().unwrap()),
+            slot: fields["slot"].as_u64().unwrap(),
+            event_index: fields["event_index"].as_u64().unwrap() as u32,
+            sender: hex_to_bytes32(fields["sender"].as_str().unwrap()),
+            recipient: hex_to_bytes32(fields["recipient"].as_str().unwrap()),
+            amount: fields["amount"].as_u64().unwrap(),
+            nonce: fields["nonce"].as_u64().unwrap(),
+            asset_id: hex_to_bytes32(fields["asset_id"].as_str().unwrap()),
+        }
+    }
+
+    fn build_unlock_envelope(fields: &Value) -> UnlockEnvelope {
+        UnlockEnvelope {
+            domain_sep: fields["domain_sep"].as_str().unwrap().as_bytes().to_vec(),
+            transfer_id: hex_to_bytes32(fields["transfer_id"].as_str().unwrap()),
+            recipient: hex_to_bytes32(fields["recipient"].as_str().unwrap()),
+            amount: fields["amount"].as_u64().unwrap(),
+            burn_tx_hash: hex_to_bytes32(fields["burn_tx_hash"].as_str().unwrap()),
+            dcc_chain_id: fields["dcc_chain_id"].as_u64().unwrap() as u32,
+            expiration: fields["expiration"].as_i64().unwrap(),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Golden Vector
+    // ═══════════════════════════════════════════════════════
 
     #[test]
     fn test_golden_vector_v001() {
-        let env = DepositEnvelope {
-            domain_sep: DOMAIN_SEP_DEPOSIT.to_vec(),
-            src_chain_id: 1,
-            dst_chain_id: 2,
-            src_program_id: hex_to_bytes32(
-                "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
-            ),
-            slot: 1000,
-            event_index: 0,
-            sender: [0u8; 32],
-            recipient: [1u8; 32],
-            amount: 1_000_000_000,
-            nonce: 0,
-            asset_id: hex_to_bytes32(
-                "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001",
-            ),
-        };
+        let vectors = load_vectors();
+        let v = &vectors[0];
+        let fields = &v["fields"];
+        let env = build_deposit_envelope(fields);
 
         let preimage = encode_deposit_message(&env);
         assert_eq!(preimage.len(), DEPOSIT_PREIMAGE_LENGTH);
+
+        // Check preimage hex matches
+        let expected_hex = v["expected_preimage_hex"].as_str().unwrap();
+        assert_eq!(bytes_to_hex(&preimage), expected_hex, "V-001 preimage mismatch");
 
         let message_id = hash_message(&preimage);
-        let expected = hex_to_bytes32(
-            "6ad0deb8ad960e168e2ceb0c6923a94b90c9015386ffd60ce8550d0e17d96444",
-        );
-        assert_eq!(message_id, expected, "Golden vector must match");
+        let expected_id = v["expected_message_id"].as_str().unwrap();
+        assert_eq!(bytes_to_hex(&message_id), expected_id, "V-001 message_id mismatch");
+
+        // Leaf hash
+        let leaf = compute_leaf_hash(&message_id);
+        let expected_leaf = v["expected_leaf_hash"].as_str().unwrap();
+        assert_eq!(bytes_to_hex(&leaf), expected_leaf, "V-001 leaf hash mismatch");
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // All Vectors — Preimage + Hash
+    // ═══════════════════════════════════════════════════════
+
+    #[test]
+    fn test_all_vectors_preimage_and_hash() {
+        let vectors = load_vectors();
+        for v in &vectors {
+            let id = v["id"].as_str().unwrap();
+            let is_unlock = v["type"].as_str().map(|t| t == "unlock").unwrap_or(false);
+            let fields = &v["fields"];
+            let expected_len = v["expected_preimage_length"].as_u64().unwrap() as usize;
+
+            if is_unlock {
+                // Skip if amount overflows u64
+                if fields["amount"].as_u64().is_none() { continue; }
+
+                let env = build_unlock_envelope(fields);
+                let preimage = encode_unlock_message(&env);
+                assert_eq!(preimage.len(), expected_len, "{id} — preimage length mismatch");
+
+                if let Some(hex) = v["expected_preimage_hex"].as_str() {
+                    assert_eq!(bytes_to_hex(&preimage), hex, "{id} — preimage hex mismatch");
+                }
+                if let Some(expected_id) = v["expected_message_id"].as_str() {
+                    let msgid = hash_message(&preimage);
+                    assert_eq!(bytes_to_hex(&msgid), expected_id, "{id} — message_id mismatch");
+                }
+            } else {
+                // Skip if amount/nonce/slot overflows u64
+                if fields["amount"].as_u64().is_none()
+                    || fields["nonce"].as_u64().is_none()
+                    || fields["slot"].as_u64().is_none()
+                {
+                    continue;
+                }
+
+                let env = build_deposit_envelope(fields);
+                let preimage = encode_deposit_message(&env);
+                assert_eq!(preimage.len(), expected_len, "{id} — preimage length mismatch");
+
+                if let Some(hex) = v["expected_preimage_hex"].as_str() {
+                    assert_eq!(bytes_to_hex(&preimage), hex, "{id} — preimage hex mismatch");
+                }
+                if let Some(expected_id) = v["expected_message_id"].as_str() {
+                    let msgid = hash_message(&preimage);
+                    assert_eq!(bytes_to_hex(&msgid), expected_id, "{id} — message_id mismatch");
+                }
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Leaf Hash for All Deposit Vectors
+    // ═══════════════════════════════════════════════════════
+
+    #[test]
+    fn test_all_vectors_leaf_hash() {
+        let vectors = load_vectors();
+        for v in &vectors {
+            let id = v["id"].as_str().unwrap();
+            if v["type"].as_str().map(|t| t == "unlock").unwrap_or(false) { continue; }
+            if v["expected_leaf_hash"].as_str().is_none() { continue; }
+            if v["fields"]["amount"].as_u64().is_none()
+                || v["fields"]["nonce"].as_u64().is_none()
+                || v["fields"]["slot"].as_u64().is_none()
+            {
+                continue;
+            }
+
+            let env = build_deposit_envelope(&v["fields"]);
+            let preimage = encode_deposit_message(&env);
+            let message_id = hash_message(&preimage);
+            let leaf = compute_leaf_hash(&message_id);
+            let expected = v["expected_leaf_hash"].as_str().unwrap();
+            assert_eq!(bytes_to_hex(&leaf), expected, "{id} — leaf hash mismatch");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // ZK Public Input Derivation (128-bit split)
+    // ═══════════════════════════════════════════════════════
+
+    #[test]
+    fn test_all_vectors_public_inputs() {
+        let vectors = load_vectors();
+        for v in &vectors {
+            let id = v["id"].as_str().unwrap();
+            if v["type"].as_str().map(|t| t == "unlock").unwrap_or(false) { continue; }
+            if v["expected_public_inputs"].is_null() { continue; }
+            if v["fields"]["amount"].as_u64().is_none()
+                || v["fields"]["nonce"].as_u64().is_none()
+                || v["fields"]["slot"].as_u64().is_none()
+            {
+                continue;
+            }
+
+            let env = build_deposit_envelope(&v["fields"]);
+            let preimage = encode_deposit_message(&env);
+            let message_id = hash_message(&preimage);
+            let recipient = hex_to_bytes32(v["fields"]["recipient"].as_str().unwrap());
+
+            let (msg_lo, msg_hi) = split_to_128(&message_id);
+            let (recip_lo, recip_hi) = split_to_128(&recipient);
+
+            let pi = &v["expected_public_inputs"];
+            assert_eq!(
+                msg_lo.to_string(),
+                pi["message_id_lo"].as_str().unwrap(),
+                "{id} — message_id_lo"
+            );
+            assert_eq!(
+                msg_hi.to_string(),
+                pi["message_id_hi"].as_str().unwrap(),
+                "{id} — message_id_hi"
+            );
+            assert_eq!(
+                pi["amount"].as_str().unwrap(),
+                v["fields"]["amount"].as_u64().unwrap().to_string(),
+                "{id} — amount"
+            );
+            assert_eq!(
+                recip_lo.to_string(),
+                pi["recipient_lo"].as_str().unwrap(),
+                "{id} — recipient_lo"
+            );
+            assert_eq!(
+                recip_hi.to_string(),
+                pi["recipient_hi"].as_str().unwrap(),
+                "{id} — recipient_hi"
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // split_to_128 Unit Tests
+    // ═══════════════════════════════════════════════════════
+
+    #[test]
+    fn test_split_zeros() {
+        let buf = [0u8; 32];
+        let (lo, hi) = split_to_128(&buf);
+        assert_eq!(lo, 0);
+        assert_eq!(hi, 0);
     }
 
     #[test]
-    fn test_deposit_preimage_length() {
-        let env = DepositEnvelope::default();
-        let preimage = encode_deposit_message(&env);
-        assert_eq!(preimage.len(), DEPOSIT_PREIMAGE_LENGTH);
+    fn test_split_byte0_is_1() {
+        let mut buf = [0u8; 32];
+        buf[0] = 1;
+        let (lo, hi) = split_to_128(&buf);
+        assert_eq!(lo, 1);
+        assert_eq!(hi, 0);
     }
 
     #[test]
-    fn test_unlock_preimage_length() {
-        let env = UnlockEnvelope::default();
-        let preimage = encode_unlock_message(&env);
-        assert_eq!(preimage.len(), UNLOCK_PREIMAGE_LENGTH);
+    fn test_split_byte16_is_1() {
+        let mut buf = [0u8; 32];
+        buf[16] = 1;
+        let (lo, hi) = split_to_128(&buf);
+        assert_eq!(lo, 0);
+        assert_eq!(hi, 1);
     }
+
+    #[test]
+    fn test_split_all_ff() {
+        let buf = [0xffu8; 32];
+        let (lo, hi) = split_to_128(&buf);
+        assert_eq!(lo, u128::MAX);
+        assert_eq!(hi, u128::MAX);
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Mutation tests
+    // ═══════════════════════════════════════════════════════
 
     #[test]
     fn test_cross_chain_no_collision() {
@@ -195,62 +409,46 @@ mod tests {
             dst_chain_id: 1,
             ..Default::default()
         };
-
-        let id1 = compute_deposit_message_id(&env1);
-        let id2 = compute_deposit_message_id(&env2);
-        assert_ne!(id1, id2, "Swapped chain IDs must produce different IDs");
+        assert_ne!(
+            compute_deposit_message_id(&env1),
+            compute_deposit_message_id(&env2),
+            "Swapped chain IDs must differ"
+        );
     }
 
     #[test]
     fn test_amount_mutation() {
-        let env1 = DepositEnvelope {
-            amount: 1_000_000_000,
-            ..Default::default()
-        };
-        let env2 = DepositEnvelope {
-            amount: 1_000_000_001,
-            ..Default::default()
-        };
-
-        let id1 = compute_deposit_message_id(&env1);
-        let id2 = compute_deposit_message_id(&env2);
-        assert_ne!(id1, id2, "Different amounts must produce different IDs");
+        let env1 = DepositEnvelope { amount: 1_000_000_000, ..Default::default() };
+        let env2 = DepositEnvelope { amount: 1_000_000_001, ..Default::default() };
+        assert_ne!(
+            compute_deposit_message_id(&env1),
+            compute_deposit_message_id(&env2),
+        );
     }
 
     #[test]
     fn test_nonce_mutation() {
-        let env1 = DepositEnvelope {
-            nonce: 0,
-            ..Default::default()
-        };
-        let env2 = DepositEnvelope {
-            nonce: 1,
-            ..Default::default()
-        };
-
-        let id1 = compute_deposit_message_id(&env1);
-        let id2 = compute_deposit_message_id(&env2);
-        assert_ne!(id1, id2, "Different nonces must produce different IDs");
+        let env1 = DepositEnvelope { nonce: 0, ..Default::default() };
+        let env2 = DepositEnvelope { nonce: 1, ..Default::default() };
+        assert_ne!(
+            compute_deposit_message_id(&env1),
+            compute_deposit_message_id(&env2),
+        );
     }
 
+    // ═══════════════════════════════════════════════════════
+    // All unique message IDs
+    // ═══════════════════════════════════════════════════════
+
     #[test]
-    fn test_max_values() {
-        let env = DepositEnvelope {
-            src_chain_id: u32::MAX,
-            dst_chain_id: u32::MAX,
-            slot: u64::MAX,
-            event_index: u32::MAX,
-            amount: u64::MAX,
-            nonce: u64::MAX,
-            src_program_id: [0xff; 32],
-            sender: [0xff; 32],
-            recipient: [0xff; 32],
-            asset_id: [0xff; 32],
-            ..Default::default()
-        };
-        let preimage = encode_deposit_message(&env);
-        assert_eq!(preimage.len(), DEPOSIT_PREIMAGE_LENGTH);
-        let id = hash_message(&preimage);
-        assert_ne!(id, [0u8; 32]);
+    fn test_all_message_ids_unique() {
+        let vectors = load_vectors();
+        let mut ids: Vec<String> = Vec::new();
+        for v in &vectors {
+            if let Some(mid) = v["expected_message_id"].as_str() {
+                assert!(!ids.contains(&mid.to_string()), "Duplicate message_id: {mid}");
+                ids.push(mid.to_string());
+            }
+        }
     }
 }

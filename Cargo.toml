@@ -2,6 +2,7 @@
 members = [
     "programs/sol-bridge-lock",
     "programs/checkpoint_registry",
+    "libs/encoding-rust",
 ]
 resolver = "2"
 

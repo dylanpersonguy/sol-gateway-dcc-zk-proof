@@ -3,6 +3,8 @@
  *
  * Single source of truth for message encoding/hashing.
  * Must produce identical bytes to Rust `compute_message_id()` and RIDE `computeMessageId()`.
+ *
+ * See /spec/encoding.md for the full canonical specification.
  */
 
 import { keccak_256 } from '@noble/hashes/sha3';
@@ -35,6 +37,17 @@ export interface UnlockEnvelope {
   expiration: bigint; // i64
 }
 
+export interface ZkPublicInputs {
+  checkpointRootLo: bigint;
+  checkpointRootHi: bigint;
+  messageIdLo: bigint;
+  messageIdHi: bigint;
+  amount: bigint;
+  recipientLo: bigint;
+  recipientHi: bigint;
+  version: bigint;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════════
@@ -45,6 +58,9 @@ export const DOMAIN_SEP_MINT = 'SOL_DCC_BRIDGE_V1_MINT';
 
 export const DEPOSIT_PREIMAGE_LENGTH = 181;
 export const UNLOCK_PREIMAGE_LENGTH = 140;
+
+/** BN128 scalar field order */
+export const BN128_ORDER = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 
 // ═══════════════════════════════════════════════════════════════
 // Helpers
@@ -278,6 +294,113 @@ export function parseDepositMessage(bytes: Uint8Array): DepositEnvelope {
     nonce,
     assetId,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Leaf & Merkle helpers
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Compute leaf hash = Keccak256(0x00 || message_id).
+ * RFC 6962 §2.1 domain separation for Merkle leaves.
+ */
+export function computeLeafHash(messageId: Uint8Array): Uint8Array {
+  if (messageId.length !== 32) throw new Error('messageId must be 32 bytes');
+  const buf = new Uint8Array(33);
+  buf[0] = 0x00;
+  buf.set(messageId, 1);
+  return keccak_256(buf);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ZK Public Input Derivation
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Split a 32-byte value into two 128-bit LE unsigned integers [lo, hi].
+ * bytes[0..16] → lo (LE u128), bytes[16..32] → hi (LE u128).
+ */
+export function splitTo128(bytes: Uint8Array): [bigint, bigint] {
+  if (bytes.length !== 32) throw new Error('Input must be 32 bytes');
+  let lo = 0n;
+  for (let i = 15; i >= 0; i--) lo = (lo << 8n) | BigInt(bytes[i]);
+  let hi = 0n;
+  for (let i = 31; i >= 16; i--) hi = (hi << 8n) | BigInt(bytes[i]);
+  return [lo, hi];
+}
+
+/**
+ * Pack a field element into 32 bytes big-endian (for RIDE groth16Verify inputs).
+ */
+export function fieldToBytes32BE(val: bigint): Uint8Array {
+  const buf = new Uint8Array(32);
+  let v = val;
+  for (let i = 31; i >= 0; i--) {
+    buf[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return buf;
+}
+
+/**
+ * Derive the 8 ZK public inputs from message_id, amount, and recipient.
+ * checkpoint_root must be provided separately (set to 0 if unknown).
+ */
+export function derivePublicInputs(
+  messageId: Uint8Array,
+  amount: bigint,
+  recipient: Uint8Array,
+  checkpointRoot?: Uint8Array,
+): ZkPublicInputs {
+  if (messageId.length !== 32) throw new Error('messageId must be 32 bytes');
+  if (recipient.length !== 32) throw new Error('recipient must be 32 bytes');
+
+  const [rootLo, rootHi] = checkpointRoot
+    ? splitTo128(checkpointRoot)
+    : [0n, 0n];
+  const [msgLo, msgHi] = splitTo128(messageId);
+  const [recipLo, recipHi] = splitTo128(recipient);
+
+  // Validate all fit in BN128 field
+  for (const v of [rootLo, rootHi, msgLo, msgHi, amount, recipLo, recipHi]) {
+    if (v >= BN128_ORDER) {
+      throw new Error(`Value ${v} exceeds BN128 scalar field order`);
+    }
+  }
+
+  return {
+    checkpointRootLo: rootLo,
+    checkpointRootHi: rootHi,
+    messageIdLo: msgLo,
+    messageIdHi: msgHi,
+    amount,
+    recipientLo: recipLo,
+    recipientHi: recipHi,
+    version: 1n,
+  };
+}
+
+/**
+ * Pack 8 ZK public inputs into 256 bytes for RIDE's groth16Verify.
+ * Each field element is 32-byte big-endian.
+ */
+export function packPublicInputsForRide(inputs: ZkPublicInputs): Uint8Array {
+  const buf = new Uint8Array(256);
+  let offset = 0;
+  for (const val of [
+    inputs.checkpointRootLo,
+    inputs.checkpointRootHi,
+    inputs.messageIdLo,
+    inputs.messageIdHi,
+    inputs.amount,
+    inputs.recipientLo,
+    inputs.recipientHi,
+    inputs.version,
+  ]) {
+    buf.set(fieldToBytes32BE(val), offset);
+    offset += 32;
+  }
+  return buf;
 }
 
 // ═══════════════════════════════════════════════════════════════
