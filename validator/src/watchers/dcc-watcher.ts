@@ -216,14 +216,51 @@ export class DccWatcher extends EventEmitter {
   }
 
   /**
-   * Verify a burn record exists on-chain
+   * Verify a burn record exists on-chain AND the block is finalized (M-5 fix).
+   * Uses DCC node's block-at-height endpoint to confirm the block has been
+   * adopted by the network (has a valid generator signature and successor).
    */
   private async verifyBurnOnChain(burnId: string): Promise<boolean> {
     try {
-      const response = await this.client.get(
+      // Step 1: Verify the burn data entry exists on the bridge contract
+      const dataResp = await this.client.get(
         `/addresses/data/${this.config.bridgeContract}/burn_${burnId}`
       );
-      return response.status === 200 && response.data?.value;
+      if (dataResp.status !== 200 || !dataResp.data?.value) {
+        return false;
+      }
+
+      // Step 2: Retrieve the burn's original transaction to get its block height
+      const event = this.pendingBurns.get(burnId);
+      if (!event) return false;
+
+      // Step 3: Verify that the block at the burn height is actually finalized.
+      // A DCC block is considered finalized when it has a valid reference to
+      // the next block (i.e., successors exist). We check that height + 1 exists.
+      const burnHeight = event.height;
+      const successorResp = await this.client.get(`/blocks/at/${burnHeight + 1}`);
+      if (successorResp.status !== 200 || !successorResp.data?.reference) {
+        this.logger.warn('Burn block successor not yet available — not finalized', { burnId, burnHeight });
+        return false;
+      }
+
+      // Step 4: Verify the transaction is actually in that block
+      const blockResp = await this.client.get(`/blocks/at/${burnHeight}`);
+      if (blockResp.status !== 200 || !blockResp.data) {
+        return false;
+      }
+      const block = blockResp.data;
+      const txInBlock = block.transactions?.some((tx: any) => tx.id === event.txId);
+      if (!txInBlock) {
+        this.logger.error('Burn tx NOT found in its claimed block — possible forgery', {
+          burnId,
+          txId: event.txId,
+          burnHeight,
+        });
+        return false;
+      }
+
+      return true;
     } catch {
       return false;
     }

@@ -6,6 +6,7 @@
 // Requires ADMIN_API_KEY to access any endpoint.
 
 import { Router, Request, Response, NextFunction } from 'express';
+import { timingSafeEqual } from 'crypto';
 import { createLogger } from '../utils/logger';
 import {
   getRecentTransfers,
@@ -32,7 +33,8 @@ function requireAdminKey(req: Request, res: Response, next: NextFunction) {
     req.headers['x-admin-key'] as string ||
     req.headers.authorization?.replace('Bearer ', '');
 
-  if (provided !== adminKey) {
+  if (!provided || provided.length !== adminKey.length ||
+      !timingSafeEqual(Buffer.from(provided), Buffer.from(adminKey))) {
     logger.warn('Unauthorized admin access attempt', { ip: req.ip });
     return res.status(401).json({ error: 'Unauthorized' });
   }

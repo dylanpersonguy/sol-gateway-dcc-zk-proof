@@ -17,12 +17,17 @@ import { Logger } from 'winston';
 import { createLogger } from '../utils/logger';
 import { SolanaDepositEvent } from '../watchers/solana-watcher';
 import { DccBurnEvent } from '../watchers/dcc-watcher';
+import * as nacl from 'tweetnacl';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export interface ConsensusConfig {
   nodeId: string;
   minValidators: number;
   consensusTimeoutMs: number;
   maxRetries: number;
+  /** Path to persist processed transfer IDs (JSON file). Survives restarts. */
+  processedTransfersPath?: string;
 }
 
 export interface AttestationRequest {
@@ -62,6 +67,8 @@ export class ConsensusEngine extends EventEmitter {
   private signMessage: SignCallback;
   private getPublicKey: PublicKeyCallback;
   private processedTransfers: Set<string> = new Set();
+  /** Whitelist of registered validator public keys (hex-encoded) */
+  private registeredValidators: Set<string> = new Set();
 
   constructor(
     config: ConsensusConfig,
@@ -73,6 +80,75 @@ export class ConsensusEngine extends EventEmitter {
     this.logger = createLogger('Consensus');
     this.signMessage = signMessage;
     this.getPublicKey = getPublicKey;
+
+    // Load persisted processed transfer IDs from disk
+    this.loadProcessedTransfers();
+  }
+
+  /**
+   * Load processed transfers from disk to survive restarts (H-3 fix).
+   */
+  private loadProcessedTransfers(): void {
+    const filePath = this.config.processedTransfersPath || './data/processed-transfers.json';
+    try {
+      if (fs.existsSync(filePath)) {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        if (Array.isArray(data)) {
+          for (const id of data) {
+            this.processedTransfers.add(id);
+          }
+          this.logger.info('Loaded processed transfers from disk', { count: data.length });
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn('Failed to load processed transfers — starting fresh', { error: err.message });
+    }
+  }
+
+  /**
+   * Persist processed transfers to disk.
+   */
+  private persistProcessedTransfers(): void {
+    const filePath = this.config.processedTransfersPath || './data/processed-transfers.json';
+    try {
+      const dir = path.dirname(filePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(filePath, JSON.stringify(Array.from(this.processedTransfers)), 'utf-8');
+    } catch (err: any) {
+      this.logger.error('Failed to persist processed transfers', { error: err.message });
+    }
+  }
+
+  /**
+   * Register a validator public key as trusted.
+   * Only attestations from registered validators are accepted.
+   */
+  registerValidator(publicKeyHex: string): void {
+    this.registeredValidators.add(publicKeyHex);
+    this.logger.info('Validator registered in consensus whitelist', { publicKeyHex });
+  }
+
+  /**
+   * Remove a validator from the whitelist.
+   */
+  removeValidator(publicKeyHex: string): void {
+    this.registeredValidators.delete(publicKeyHex);
+    this.logger.info('Validator removed from consensus whitelist', { publicKeyHex });
+  }
+
+  /**
+   * Bulk-sync the validator set from on-chain data.
+   */
+  syncValidatorSet(publicKeysHex: string[]): void {
+    this.registeredValidators.clear();
+    for (const pk of publicKeysHex) {
+      this.registeredValidators.add(pk);
+    }
+    // Always include our own key
+    this.registeredValidators.add(this.getPublicKey().toString('hex'));
+    this.logger.info('Validator set synced', { count: this.registeredValidators.size });
   }
 
   /**
@@ -135,9 +211,53 @@ export class ConsensusEngine extends EventEmitter {
 
   /**
    * Receive an attestation from a peer validator.
+   * Performs Ed25519 signature verification and validator whitelist check.
    */
   receiveAttestation(attestation: Attestation): void {
     const { transferId, nodeId } = attestation;
+
+    // ── GUARD: Validate attestation has required fields ──
+    if (!attestation.publicKey || !attestation.signature || !attestation.messageHash) {
+      this.logger.warn('Rejecting attestation with missing fields', { transferId, nodeId });
+      return;
+    }
+
+    // ── GUARD: Validator whitelist check (H-2 fix) ──
+    const pubkeyHex = attestation.publicKey.toString('hex');
+    if (this.registeredValidators.size > 0 && !this.registeredValidators.has(pubkeyHex)) {
+      this.logger.error('REJECTING attestation from unregistered validator', {
+        transferId,
+        nodeId,
+        publicKey: pubkeyHex,
+      });
+      this.emit('unregistered_validator', { nodeId, publicKey: pubkeyHex, transferId });
+      return;
+    }
+
+    // ── GUARD: Ed25519 signature verification (H-1 fix) ──
+    try {
+      const isValid = nacl.sign.detached.verify(
+        new Uint8Array(attestation.messageHash),
+        new Uint8Array(attestation.signature),
+        new Uint8Array(attestation.publicKey),
+      );
+      if (!isValid) {
+        this.logger.error('REJECTING attestation with INVALID Ed25519 signature', {
+          transferId,
+          nodeId,
+          publicKey: pubkeyHex,
+        });
+        this.emit('byzantine_detected', { nodeId, transferId, reason: 'invalid_signature' });
+        return;
+      }
+    } catch (err: any) {
+      this.logger.error('Signature verification threw error — rejecting', {
+        transferId,
+        nodeId,
+        error: err.message,
+      });
+      return;
+    }
 
     const pending = this.pendingConsensus.get(transferId);
     if (!pending) {
@@ -161,6 +281,15 @@ export class ConsensusEngine extends EventEmitter {
       return;
     }
 
+    // ── GUARD: No duplicate attestations from same public key ──
+    if (pending.attestations.some((a) => a.publicKey.equals(attestation.publicKey))) {
+      this.logger.warn('Duplicate attestation from same public key', {
+        transferId,
+        publicKey: pubkeyHex,
+      });
+      return;
+    }
+
     // ── GUARD: Verify the attestation signs the same message ──
     if (!pending.message.equals(attestation.messageHash)) {
       this.logger.error('ALERT: Message hash mismatch — possible Byzantine behavior', {
@@ -174,7 +303,7 @@ export class ConsensusEngine extends EventEmitter {
     }
 
     pending.attestations.push(attestation);
-    this.logger.info('Received attestation', {
+    this.logger.info('Received attestation (verified)', {
       transferId,
       nodeId,
       total: pending.attestations.length,
@@ -206,6 +335,7 @@ export class ConsensusEngine extends EventEmitter {
       };
 
       this.processedTransfers.add(transferId);
+      this.persistProcessedTransfers(); // H-3: persist to disk immediately
       this.logger.info('CONSENSUS REACHED', {
         transferId,
         signatures: result.receivedSignatures,
@@ -250,39 +380,116 @@ export class ConsensusEngine extends EventEmitter {
   /**
    * Construct the canonical message that all validators must sign.
    * This ensures deterministic message construction across all nodes.
+   *
+   * CRITICAL: The unlock message format MUST match the Solana program's
+   * construct_unlock_message() byte-for-byte, or Ed25519 verification fails.
    */
   private constructCanonicalMessage(request: AttestationRequest): Buffer {
+    if (request.type === 'mint') {
+      return this.constructMintMessage(request);
+    } else {
+      return this.constructUnlockMessage(request);
+    }
+  }
+
+  /**
+   * Construct the canonical mint attestation message.
+   * Used for SOL→DCC deposits triggering wSOL minting on DCC.
+   */
+  private constructMintMessage(request: AttestationRequest): Buffer {
     const parts: Buffer[] = [];
 
-    // Domain separator
-    parts.push(Buffer.from('SOL_DCC_BRIDGE_V1'));
+    // Domain separator for mint attestation
+    parts.push(Buffer.from('SOL_DCC_BRIDGE_V1_MINT'));
 
-    // Type prefix
-    parts.push(Buffer.from(request.type === 'mint' ? 'MINT' : 'UNLOCK'));
+    // Transfer ID (raw 32 bytes)
+    const transferIdBuf = Buffer.alloc(32);
+    const tidHex = Buffer.from(request.transferId, 'hex');
+    tidHex.copy(transferIdBuf, 0, 0, Math.min(32, tidHex.length));
+    parts.push(transferIdBuf);
 
-    // Transfer ID
-    parts.push(Buffer.from(request.transferId, 'hex'));
+    const event = request.event as SolanaDepositEvent;
 
-    if (request.type === 'mint') {
-      const event = request.event as SolanaDepositEvent;
-      // Canonical ordering: transferId, sender, recipient, amount, nonce, slot, chainId
-      parts.push(Buffer.from(event.sender));
-      parts.push(Buffer.from(event.recipientDcc, 'hex'));
-      parts.push(this.bigintToBuffer(event.amount));
-      parts.push(this.bigintToBuffer(event.nonce));
-      parts.push(this.uint64ToBuffer(event.slot));
-      parts.push(this.uint32ToBuffer(event.chainId));
-    } else {
-      const event = request.event as DccBurnEvent;
-      parts.push(Buffer.from(event.sender));
-      parts.push(Buffer.from(event.solRecipient));
-      parts.push(this.bigintToBuffer(event.amount));
-      parts.push(this.uint64ToBuffer(event.height));
-      parts.push(Buffer.from(event.txId));
-    }
+    // Sender (32 bytes raw pubkey)
+    const senderBuf = Buffer.alloc(32);
+    const senderBytes = Buffer.from(event.sender, 'hex');
+    senderBytes.copy(senderBuf, 0, 0, Math.min(32, senderBytes.length));
+    parts.push(senderBuf);
 
-    // Timestamp for expiration
+    // Recipient DCC (32 bytes raw)
+    const recipientBuf = Buffer.alloc(32);
+    const recipientBytes = Buffer.from(event.recipientDcc, 'hex');
+    recipientBytes.copy(recipientBuf, 0, 0, Math.min(32, recipientBytes.length));
+    parts.push(recipientBuf);
+
+    // Amount as u64 LE
+    parts.push(this.bigintToBuffer(event.amount));
+
+    // Nonce as u64 LE
+    parts.push(this.bigintToBuffer(event.nonce));
+
+    // Slot as u64 LE
+    parts.push(this.uint64ToBuffer(event.slot));
+
+    // Chain ID as u32 LE
+    parts.push(this.uint32ToBuffer(event.chainId));
+
+    // Timestamp as u64 LE
     parts.push(this.uint64ToBuffer(request.timestamp));
+
+    return Buffer.concat(parts);
+  }
+
+  /**
+   * Construct the canonical unlock message.
+   * MUST match Solana's construct_unlock_message() exactly:
+   *   domain_sep (24B) = "SOL_DCC_BRIDGE_UNLOCK_V1"
+   *   transfer_id (32B raw)
+   *   recipient (32B raw Solana pubkey)
+   *   amount (8B LE u64)
+   *   burn_tx_hash (32B raw)
+   *   dcc_chain_id (4B LE u32)
+   *   expiration (8B LE i64)
+   */
+  private constructUnlockMessage(request: AttestationRequest): Buffer {
+    const event = request.event as DccBurnEvent;
+    const parts: Buffer[] = [];
+
+    // Domain separator — MUST be exactly "SOL_DCC_BRIDGE_UNLOCK_V1" (24 bytes)
+    parts.push(Buffer.from('SOL_DCC_BRIDGE_UNLOCK_V1'));
+
+    // Transfer ID (32 bytes raw)
+    const transferIdBuf = Buffer.alloc(32);
+    const tidHex = Buffer.from(request.transferId, 'hex');
+    tidHex.copy(transferIdBuf, 0, 0, Math.min(32, tidHex.length));
+    parts.push(transferIdBuf);
+
+    // Recipient Solana pubkey (32 bytes raw) — from base58 to raw bytes
+    const { PublicKey } = require('@solana/web3.js');
+    const recipientPubkey = new PublicKey(event.solRecipient);
+    parts.push(recipientPubkey.toBuffer());
+
+    // Amount as u64 LE (unsigned)
+    const amountBuf = Buffer.alloc(8);
+    amountBuf.writeBigUInt64LE(BigInt(event.amount));
+    parts.push(amountBuf);
+
+    // Burn TX hash (32 bytes raw)
+    const burnTxBuf = Buffer.alloc(32);
+    const burnTxBytes = Buffer.from(event.txId, 'hex');
+    burnTxBytes.copy(burnTxBuf, 0, 0, Math.min(32, burnTxBytes.length));
+    parts.push(burnTxBuf);
+
+    // DCC chain ID as u32 LE (default: 2)
+    const dccChainIdBuf = Buffer.alloc(4);
+    dccChainIdBuf.writeUInt32LE(2);
+    parts.push(dccChainIdBuf);
+
+    // Expiration as i64 LE (1 hour from request timestamp)
+    const expiration = Math.floor(request.timestamp / 1000) + 3600;
+    const expBuf = Buffer.alloc(8);
+    expBuf.writeBigInt64LE(BigInt(expiration));
+    parts.push(expBuf);
 
     return Buffer.concat(parts);
   }

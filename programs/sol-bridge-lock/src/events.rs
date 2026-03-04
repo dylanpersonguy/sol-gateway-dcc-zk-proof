@@ -40,11 +40,13 @@ pub struct BridgeDeposit {
 pub struct BridgeDepositSpl {
     /// Globally unique transfer identifier
     pub transfer_id: [u8; 32],
+    /// ZK bridge message ID = Keccak256(domain_sep || fields)
+    pub message_id: [u8; 32],
     /// Depositor's Solana public key
     pub sender: Pubkey,
     /// Recipient address on DecentralChain
     pub recipient_dcc: [u8; 32],
-    /// SPL token mint address
+    /// SPL token mint address (used as asset_id in message_id)
     pub spl_mint: Pubkey,
     /// Amount in smallest token units
     pub amount: u64,
@@ -52,6 +54,8 @@ pub struct BridgeDepositSpl {
     pub nonce: u64,
     /// Solana slot at deposit time
     pub slot: u64,
+    /// Event index within the checkpoint window
+    pub event_index: u32,
     /// Unix timestamp
     pub timestamp: i64,
     /// Solana chain ID (domain separation)

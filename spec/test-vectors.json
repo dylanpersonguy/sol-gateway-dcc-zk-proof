@@ -1,0 +1,576 @@
+{
+  "version": "1.0",
+  "description": "Canonical encoding test vectors for SOL⇄DCC ZK Bridge",
+  "hash_function": "keccak256",
+  "encoding": "little-endian for all integers",
+  "vectors": [
+    {
+      "id": "V-001",
+      "name": "Golden vector — 1 SOL basic deposit",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 1000,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000000",
+        "recipient": "0101010101010101010101010101010101010101010101010101010101010101",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181,
+      "expected_message_id": "6ad0deb8ad960e168e2ceb0c6923a94b90c9015386ffd60ce8550d0e17d96444"
+    },
+    {
+      "id": "V-002",
+      "name": "Minimum deposit — 1 lamport",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "slot": 0,
+        "event_index": 0,
+        "sender": "0202020202020202020202020202020202020202020202020202020202020202",
+        "recipient": "0303030303030303030303030303030303030303030303030303030303030303",
+        "amount": 1,
+        "nonce": 0,
+        "asset_id": "0404040404040404040404040404040404040404040404040404040404040404"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-003",
+      "name": "Maximum u64 amount",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "slot": 18446744073709551615,
+        "event_index": 4294967295,
+        "sender": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "recipient": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "amount": 18446744073709551615,
+        "nonce": 18446744073709551615,
+        "asset_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-004",
+      "name": "Different chain IDs — DCC mainnet (63)",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 63,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 500,
+        "event_index": 3,
+        "sender": "aabbccdd00000000000000000000000000000000000000000000000000000000",
+        "recipient": "1122334400000000000000000000000000000000000000000000000000000000",
+        "amount": 5000000000,
+        "nonce": 42,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-005",
+      "name": "Large event_index",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 999999,
+        "event_index": 65535,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000002",
+        "amount": 100000000,
+        "nonce": 100,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-006",
+      "name": "Zero nonce boundary",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 99,
+        "dst_chain_id": 100,
+        "src_program_id": "abcdef0000000000000000000000000000000000000000000000000000000000",
+        "slot": 1,
+        "event_index": 0,
+        "sender": "1111111111111111111111111111111111111111111111111111111111111111",
+        "recipient": "2222222222222222222222222222222222222222222222222222222222222222",
+        "amount": 500000000,
+        "nonce": 0,
+        "asset_id": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-007",
+      "name": "Nonce = u64 max",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "slot": 100,
+        "event_index": 1,
+        "sender": "0505050505050505050505050505050505050505050505050505050505050505",
+        "recipient": "0606060606060606060606060606060606060606060606060606060606060606",
+        "amount": 1000000,
+        "nonce": 18446744073709551615,
+        "asset_id": "0707070707070707070707070707070707070707070707070707070707070707"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-008",
+      "name": "Cross-chain collision test — SOL→DCC vs DCC→SOL",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 2,
+        "dst_chain_id": 1,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 1000,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000000",
+        "recipient": "0101010101010101010101010101010101010101010101010101010101010101",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181,
+      "note": "Must differ from V-001 (chain IDs swapped)"
+    },
+    {
+      "id": "V-009",
+      "name": "Slot = 0 edge case",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 0,
+        "event_index": 0,
+        "sender": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recipient": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "amount": 777777777,
+        "nonce": 1,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-010",
+      "name": "All-zero asset_id (invalid but should still hash)",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 100,
+        "event_index": 5,
+        "sender": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "recipient": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "amount": 2000000000,
+        "nonce": 10,
+        "asset_id": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-011",
+      "name": "wSOL native sentinel asset",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 50000,
+        "event_index": 12,
+        "sender": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "recipient": "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
+        "amount": 10000000000,
+        "nonce": 999,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-012",
+      "name": "Successive nonces — nonce=0",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 200,
+        "event_index": 0,
+        "sender": "aaaa000000000000000000000000000000000000000000000000000000000000",
+        "recipient": "bbbb000000000000000000000000000000000000000000000000000000000000",
+        "amount": 100000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181,
+      "note": "Must differ from V-013 (nonce=1)"
+    },
+    {
+      "id": "V-013",
+      "name": "Successive nonces — nonce=1",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 200,
+        "event_index": 0,
+        "sender": "aaaa000000000000000000000000000000000000000000000000000000000000",
+        "recipient": "bbbb000000000000000000000000000000000000000000000000000000000000",
+        "amount": 100000000,
+        "nonce": 1,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181,
+      "note": "Must differ from V-012 (nonce=0)"
+    },
+    {
+      "id": "V-014",
+      "name": "Amount = 0 (should hash but would be rejected by contract)",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 300,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000002",
+        "amount": 0,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-015",
+      "name": "Large slot number",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 999999999999,
+        "event_index": 100,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000002",
+        "amount": 50000000000,
+        "nonce": 500,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-016",
+      "name": "src_chain_id = dst_chain_id (should still hash, rejected by logic)",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 1,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 100,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000002",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-017",
+      "name": "Recipient with leading zeros",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 100,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000001",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-018",
+      "name": "Sender = Recipient",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 100,
+        "event_index": 0,
+        "sender": "abababababababababababababababababababababababababababababababab",
+        "recipient": "abababababababababababababababababababababababababababababababab",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-019",
+      "name": "Max chain_id values",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 4294967295,
+        "dst_chain_id": 4294967295,
+        "src_program_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "slot": 1,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000002",
+        "amount": 1,
+        "nonce": 0,
+        "asset_id": "0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-020",
+      "name": "All-0xFF program_id",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "slot": 100,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000002",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-021",
+      "name": "Unlock message — basic",
+      "type": "unlock",
+      "fields": {
+        "domain_sep": "SOL_DCC_BRIDGE_UNLOCK_V1",
+        "transfer_id": "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000001",
+        "amount": 5000000000,
+        "burn_tx_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "dcc_chain_id": 2,
+        "expiration": 1700000000
+      },
+      "expected_preimage_length": 140
+    },
+    {
+      "id": "V-022",
+      "name": "Unlock message — max amount",
+      "type": "unlock",
+      "fields": {
+        "domain_sep": "SOL_DCC_BRIDGE_UNLOCK_V1",
+        "transfer_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "recipient": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "amount": 18446744073709551615,
+        "burn_tx_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "dcc_chain_id": 4294967295,
+        "expiration": 9999999999
+      },
+      "expected_preimage_length": 140
+    },
+    {
+      "id": "V-023",
+      "name": "Unlock message — expiry=0 (edge)",
+      "type": "unlock",
+      "fields": {
+        "domain_sep": "SOL_DCC_BRIDGE_UNLOCK_V1",
+        "transfer_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000001",
+        "amount": 1000000,
+        "burn_tx_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+        "dcc_chain_id": 2,
+        "expiration": 0
+      },
+      "expected_preimage_length": 140
+    },
+    {
+      "id": "V-024",
+      "name": "Deposit mutation test — amount+1 must differ",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 1000,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000000",
+        "recipient": "0101010101010101010101010101010101010101010101010101010101010101",
+        "amount": 1000000001,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181,
+      "note": "Must differ from V-001 (amount+1)"
+    },
+    {
+      "id": "V-025",
+      "name": "Deposit mutation test — recipient bit flip must differ",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 1000,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000000",
+        "recipient": "0101010101010101010101010101010101010101010101010101010101010100",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181,
+      "note": "Must differ from V-001 (last byte of recipient flipped)"
+    },
+    {
+      "id": "V-026",
+      "name": "10 SOL deposit",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 2000,
+        "event_index": 1,
+        "sender": "deadbeef00000000000000000000000000000000000000000000000000000000",
+        "recipient": "cafebabe00000000000000000000000000000000000000000000000000000000",
+        "amount": 10000000000,
+        "nonce": 5,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-027",
+      "name": "SPL token deposit (different asset_id)",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 3000,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000002",
+        "amount": 1000000,
+        "nonce": 0,
+        "asset_id": "c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61"
+      },
+      "expected_preimage_length": 181,
+      "note": "USDC-like SPL token mint address as asset_id"
+    },
+    {
+      "id": "V-028",
+      "name": "event_index = max u32",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V1",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 100,
+        "event_index": 4294967295,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000001",
+        "recipient": "0000000000000000000000000000000000000000000000000000000000000002",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181
+    },
+    {
+      "id": "V-029",
+      "name": "Unlock — DCC chain 63",
+      "type": "unlock",
+      "fields": {
+        "domain_sep": "SOL_DCC_BRIDGE_UNLOCK_V1",
+        "transfer_id": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "recipient": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+        "amount": 7500000000,
+        "burn_tx_hash": "abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00",
+        "dcc_chain_id": 63,
+        "expiration": 1800000000
+      },
+      "expected_preimage_length": 140
+    },
+    {
+      "id": "V-030",
+      "name": "Negative test — single byte difference in domain_sep",
+      "fields": {
+        "domain_sep": "DCC_SOL_BRIDGE_V2",
+        "src_chain_id": 1,
+        "dst_chain_id": 2,
+        "src_program_id": "82f3b18d8e2d0c7b7a6e5d4c3b2a190817161514131211100908070605040302",
+        "slot": 1000,
+        "event_index": 0,
+        "sender": "0000000000000000000000000000000000000000000000000000000000000000",
+        "recipient": "0101010101010101010101010101010101010101010101010101010101010101",
+        "amount": 1000000000,
+        "nonce": 0,
+        "asset_id": "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      },
+      "expected_preimage_length": 181,
+      "note": "NEGATIVE: V2 domain_sep must produce different hash than V-001 (V1)"
+    },
+    {
+      "id": "V-031",
+      "name": "Far future expiry unlock",
+      "type": "unlock",
+      "fields": {
+        "domain_sep": "SOL_DCC_BRIDGE_UNLOCK_V1",
+        "transfer_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "recipient": "0202020202020202020202020202020202020202020202020202020202020202",
+        "amount": 1000000000,
+        "burn_tx_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+        "dcc_chain_id": 2,
+        "expiration": 4102444800
+      },
+      "expected_preimage_length": 140,
+      "note": "Expiry in year 2100"
+    },
+    {
+      "id": "V-032",
+      "name": "Negative expiry unlock (signed i64)",
+      "type": "unlock",
+      "fields": {
+        "domain_sep": "SOL_DCC_BRIDGE_UNLOCK_V1",
+        "transfer_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "recipient": "0202020202020202020202020202020202020202020202020202020202020202",
+        "amount": 1000000000,
+        "burn_tx_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+        "dcc_chain_id": 2,
+        "expiration": -1
+      },
+      "expected_preimage_length": 140,
+      "note": "NEGATIVE: Negative expiry should be rejected by on-chain validation"
+    }
+  ]
+}

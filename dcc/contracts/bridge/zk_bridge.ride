@@ -86,6 +86,10 @@ func keyPendingLargeTxHeight(messageId: String) = "pending_large_height_" + mess
 func keyPendingRecipient(messageId: String) = "pending_recipient_" + messageId
 func keyPendingAmount(messageId: String) = "pending_amount_" + messageId
 
+# Unpause timelock: must request then wait before resuming
+func keyUnpauseRequestedAt() = "unpause_requested_at"
+let unpauseDelayBlocks = 100  # ~100 blocks delay before unpause takes effect
+
 # ═══════════════════════════════════════════════════════════════
 # HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════════
@@ -133,12 +137,43 @@ func getCheckpointRoot(id: Int) = {
     getBinaryValue(this, keyCheckpointRoot(id))
 }
 
+# ═══════════════════════════════════════════════════════════════
+# LITTLE-ENDIAN BYTE ENCODING HELPERS
+# ═══════════════════════════════════════════════════════════════
+# RIDE's toBytes(Int) produces 8-byte BIG-endian. The canonical
+# bridge encoding uses LITTLE-endian with specific widths (4B or 8B).
+# These helpers manually encode integers in LE byte order.
+
+func intToLE4(v: Int) = {
+    # Encode a u32 as 4 bytes little-endian
+    let b0 = v % 256
+    let b1 = (v / 256) % 256
+    let b2 = (v / 65536) % 256
+    let b3 = (v / 16777216) % 256
+    toBytes(b0).drop(7) + toBytes(b1).drop(7) + toBytes(b2).drop(7) + toBytes(b3).drop(7)
+}
+
+func intToLE8(v: Int) = {
+    # Encode a u64 as 8 bytes little-endian
+    let b0 = v % 256
+    let b1 = (v / 256) % 256
+    let b2 = (v / 65536) % 256
+    let b3 = (v / 16777216) % 256
+    let b4 = (v / 4294967296) % 256
+    let b5 = (v / 1099511627776) % 256
+    let b6 = (v / 281474976710656) % 256
+    let b7 = (v / 72057594037927936) % 256
+    toBytes(b0).drop(7) + toBytes(b1).drop(7) + toBytes(b2).drop(7) + toBytes(b3).drop(7) +
+    toBytes(b4).drop(7) + toBytes(b5).drop(7) + toBytes(b6).drop(7) + toBytes(b7).drop(7)
+}
+
 # Compute message_id via keccak256 (RIDE built-in)
 # message_id = keccak256(
 #   "DCC_SOL_BRIDGE_V1"(17B) || src_chain(4B LE) || dst_chain(4B LE) ||
 #   src_program(32B) || slot(8B LE) || event_index(4B LE) ||
 #   sender(32B) || recipient(32B) || amount(8B LE) || nonce(8B LE) || asset_id(32B)
 # )
+# Total preimage: 181 bytes (must match Rust, TypeScript, and Circom exactly)
 func computeMessageId(
     srcChainId: Int,
     dstChainId: Int,
@@ -151,18 +186,26 @@ func computeMessageId(
     nonce: Int,
     assetId: ByteVector
 ) = {
-    let preimage = toBytes(domainSeparator) +
-        toBytes(srcChainId) +
-        toBytes(dstChainId) +
-        srcProgramId +
-        toBytes(slot) +
-        toBytes(eventIndex) +
-        sender +
-        recipient +
-        toBytes(amount) +
-        toBytes(nonce) +
-        assetId
-    keccak256(preimage)
+    # Validate fixed-length fields
+    if (size(srcProgramId) != 32) then throw("srcProgramId must be 32 bytes")
+    else if (size(sender) != 32) then throw("sender must be 32 bytes")
+    else if (size(recipient) != 32) then throw("recipient must be 32 bytes")
+    else if (size(assetId) != 32) then throw("assetId must be 32 bytes")
+    else {
+        let preimage = toBytes(domainSeparator) +  # 17 bytes (ASCII, no length prefix via toBytes(String) in RIDE v6 = UTF-8 bytes)
+            intToLE4(srcChainId) +                  # 4 bytes LE
+            intToLE4(dstChainId) +                  # 4 bytes LE
+            srcProgramId +                          # 32 bytes
+            intToLE8(slot) +                        # 8 bytes LE
+            intToLE4(eventIndex) +                  # 4 bytes LE
+            sender +                                # 32 bytes
+            recipient +                             # 32 bytes
+            intToLE8(amount) +                      # 8 bytes LE
+            intToLE8(nonce) +                       # 8 bytes LE
+            assetId                                 # 32 bytes
+        # Total: 17 + 4 + 4 + 32 + 8 + 4 + 32 + 32 + 8 + 8 + 32 = 181 bytes
+        keccak256(preimage)
+    }
 }
 
 # Check hourly rate limit
@@ -464,15 +507,16 @@ func burn(solRecipient: String) = {
             let totalBurned = getIntegerValue(this, keyTotalBurned())
             
             # Compute burn message_id for ZK proof (reverse direction)
+            # Uses LE encoding for integer fields to match canonical spec
             let burnMessageId = toBase58String(keccak256(
                 toBytes("DCC_SOL_BRIDGE_V1_BURN") +
-                toBytes(dccChainId) +
-                toBytes(solChainId) +
+                intToLE4(dccChainId) +
+                intToLE4(solChainId) +
                 i.caller.bytes +
                 toBytes(solRecipient) +
-                toBytes(payment.amount) +
-                toBytes(userNonce) +
-                toBytes(height)
+                intToLE8(payment.amount) +
+                intToLE8(userNonce) +
+                intToLE8(height)
             ))
             
             [
@@ -509,7 +553,24 @@ func emergencyPause() = {
 func emergencyResume() = {
     if (!isAdmin(i.caller)) then throw("Only admin can resume")
     else {
-        [BooleanEntry(keyPaused(), false)]
+        # Timelocked unpause: admin must first request, then wait unpauseDelayBlocks
+        let requestedAt = match getInteger(this, keyUnpauseRequestedAt()) {
+            case h: Int => h
+            case _ => 0
+        }
+        if (requestedAt == 0) then {
+            # First call: record the request, don't actually unpause yet
+            [IntegerEntry(keyUnpauseRequestedAt(), height)]
+        }
+        else if (height - requestedAt < unpauseDelayBlocks) then {
+            throw("Unpause delay not elapsed. Wait " + (unpauseDelayBlocks - (height - requestedAt)).toString() + " more blocks")
+        }
+        else {
+            [
+                BooleanEntry(keyPaused(), false),
+                DeleteEntry(keyUnpauseRequestedAt())
+            ]
+        }
     }
 }
 

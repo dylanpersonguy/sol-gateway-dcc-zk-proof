@@ -4,7 +4,7 @@ use anchor_spl::associated_token::AssociatedToken;
 use crate::state::{BridgeConfig, DepositRecord, UserState};
 use crate::errors::BridgeError;
 use crate::events::BridgeDepositSpl;
-use crate::instructions::deposit::compute_transfer_id;
+use crate::instructions::deposit::{compute_transfer_id, compute_message_id};
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct DepositSplParams {
@@ -132,11 +132,27 @@ pub fn handler(ctx: Context<DepositSpl>, params: DepositSplParams) -> Result<()>
 
     // ── Update bridge config ──
     let config = &mut ctx.accounts.bridge_config;
+    let event_index = config.global_nonce as u32;
     // Note: total_locked tracks native SOL. For SPL tokens, tracking is
     // per-deposit in the deposit record and via events.
     config.global_nonce = config.global_nonce
         .checked_add(1)
         .ok_or(BridgeError::ArithmeticOverflow)?;
+
+    // ── Compute ZK bridge message_id (H-4 fix) ──
+    // Uses SPL mint pubkey as asset_id so SPL deposits can be included in Merkle tree
+    let message_id = compute_message_id(
+        config.solana_chain_id,
+        config.dcc_chain_id,
+        ctx.program_id,
+        clock.slot,
+        event_index,
+        &ctx.accounts.sender.key(),
+        &params.recipient_dcc,
+        params.amount,
+        current_nonce,
+        &ctx.accounts.spl_mint.key(),
+    );
 
     // ── Update user state ──
     user_state.next_nonce = current_nonce
@@ -149,33 +165,39 @@ pub fn handler(ctx: Context<DepositSpl>, params: DepositSplParams) -> Result<()>
     // ── Populate deposit record ──
     let deposit = &mut ctx.accounts.deposit_record;
     deposit.transfer_id = transfer_id;
+    deposit.message_id = message_id;
     deposit.sender = ctx.accounts.sender.key();
     deposit.recipient_dcc = params.recipient_dcc;
     deposit.amount = params.amount;
     deposit.nonce = current_nonce;
     deposit.slot = clock.slot;
+    deposit.event_index = event_index;
     deposit.timestamp = clock.unix_timestamp;
+    deposit.asset_id = ctx.accounts.spl_mint.key();
     deposit.processed = false;
     deposit.bump = ctx.bumps.deposit_record;
 
     // ── Emit SPL deposit event ──
     emit!(BridgeDepositSpl {
         transfer_id,
+        message_id,
         sender: ctx.accounts.sender.key(),
         recipient_dcc: params.recipient_dcc,
         spl_mint: ctx.accounts.spl_mint.key(),
         amount: params.amount,
         nonce: current_nonce,
         slot: clock.slot,
+        event_index,
         timestamp: clock.unix_timestamp,
         chain_id: config.solana_chain_id,
     });
 
     msg!(
-        "SPL Deposit: {} units of mint {:?}, transfer_id: {:?}, nonce: {}",
+        "SPL Deposit: {} units of mint {:?}, transfer_id: {:?}, message_id: {:?}, nonce: {}",
         params.amount,
         ctx.accounts.spl_mint.key(),
         &transfer_id[..8],
+        &message_id[..8],
         current_nonce
     );
 

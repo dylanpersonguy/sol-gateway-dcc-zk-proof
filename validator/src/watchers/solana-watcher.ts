@@ -226,8 +226,20 @@ export class SolanaWatcher extends EventEmitter {
             );
 
             if (isValid) {
+              // M-4 fix: Cross-reference log data against on-chain DepositRecord PDA
+              const pdaVerified = await this.verifyDepositPDA(event);
+              if (!pdaVerified) {
+                this.logger.error('DEPOSIT PDA MISMATCH — log data does not match on-chain state. Possible RPC manipulation.', {
+                  transferId,
+                  slot: event.slot,
+                });
+                this.pendingEvents.delete(transferId);
+                this.emit('deposit_invalidated', event);
+                continue;
+              }
+
               event.confirmations = confirmations;
-              this.logger.info('Event finalized', {
+              this.logger.info('Event finalized (PDA verified)', {
                 transferId,
                 confirmations,
                 slot: event.slot,
@@ -275,6 +287,65 @@ export class SolanaWatcher extends EventEmitter {
 
       return true;
     } catch {
+      return false;
+    }
+  }
+
+  /**
+   * M-4 fix: Verify that the deposit event data from RPC logs matches
+   * the on-chain DepositRecord PDA. Protects against malicious RPC injection.
+   */
+  private async verifyDepositPDA(event: SolanaDepositEvent): Promise<boolean> {
+    try {
+      const transferIdBytes = Buffer.from(event.transferId, 'hex');
+      const [depositPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('deposit'), transferIdBytes],
+        this.programId,
+      );
+
+      const accountInfo = await this.connection.getAccountInfo(depositPda, 'finalized');
+      if (!accountInfo || !accountInfo.data) {
+        this.logger.warn('DepositRecord PDA not found', { transferId: event.transferId });
+        return false;
+      }
+
+      // Basic sanity: account exists and is owned by the bridge program
+      if (!accountInfo.owner.equals(this.programId)) {
+        this.logger.error('DepositRecord PDA owned by wrong program', {
+          transferId: event.transferId,
+          owner: accountInfo.owner.toBase58(),
+        });
+        return false;
+      }
+
+      // Skip discriminator (8 bytes), read transfer_id (32 bytes)
+      const data = accountInfo.data;
+      if (data.length < 40) return false;
+      const onChainTransferId = data.subarray(8, 40).toString('hex');
+      if (onChainTransferId !== event.transferId) {
+        this.logger.error('DepositRecord transfer_id mismatch', {
+          expected: event.transferId,
+          onChain: onChainTransferId,
+        });
+        return false;
+      }
+
+      // Read amount from PDA: skip 8(disc) + 32(tid) + 32(mid) + 32(sender) + 32(recipient) = 136, then 8 bytes u64 LE
+      if (data.length >= 144) {
+        const onChainAmount = data.readBigUInt64LE(136);
+        if (onChainAmount !== BigInt(event.amount)) {
+          this.logger.error('DepositRecord amount mismatch', {
+            expected: event.amount.toString(),
+            onChain: onChainAmount.toString(),
+          });
+          return false;
+        }
+      }
+
+      return true;
+    } catch (err: any) {
+      this.logger.warn('Failed to verify deposit PDA', { error: err.message });
+      // Fail closed: if we can't verify, reject
       return false;
     }
   }

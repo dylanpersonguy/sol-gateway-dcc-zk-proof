@@ -18,6 +18,7 @@ import { ConsensusEngine, ConsensusResult, Attestation } from './consensus/engin
 import { ThresholdSigner } from './signer/threshold-signer';
 import { P2PTransport } from './p2p/transport';
 import { createLogger } from './utils/logger';
+import { RateLimiter } from './utils/rate-limiter';
 import {
   Connection,
   Keypair,
@@ -133,12 +134,49 @@ async function main(): Promise<void> {
   // EVENT WIRING
   // ═══════════════════════════════════════════════════════════
 
+  // ── Initialize Rate Limiter (M-2 fix) ──
+  const rateLimiter = new RateLimiter({
+    maxDailyOutflowLamports: config.maxDailyOutflowLamports,
+    maxSingleTxLamports: config.maxSingleTxLamports,
+    minDepositLamports: config.minDepositLamports,
+  });
+  logger.info('Rate limiter initialized', {
+    maxDaily: config.maxDailyOutflowLamports.toString(),
+    maxSingle: config.maxSingleTxLamports.toString(),
+  });
+
   // Solana deposit finalized → propose mint attestation
   solanaWatcher.on('deposit_finalized', (event: SolanaDepositEvent) => {
     logger.info('Solana deposit finalized → proposing mint', {
       transferId: event.transferId,
       amount: event.amount.toString(),
     });
+
+    // M-2: Enforce rate limits before processing deposit
+    const amountBigint = BigInt(event.amount);
+    if (amountBigint < config.minDepositLamports) {
+      logger.warn('Deposit below minimum — rejecting', {
+        transferId: event.transferId,
+        amount: amountBigint.toString(),
+        min: config.minDepositLamports.toString(),
+      });
+      return;
+    }
+    if (amountBigint > config.maxSingleTxLamports) {
+      logger.warn('Deposit exceeds single-tx limit — rejecting', {
+        transferId: event.transferId,
+        amount: amountBigint.toString(),
+        max: config.maxSingleTxLamports.toString(),
+      });
+      return;
+    }
+    if (!rateLimiter.tryConsume(amountBigint)) {
+      logger.error('RATE LIMIT: Daily outflow limit would be exceeded — rejecting deposit', {
+        transferId: event.transferId,
+        amount: amountBigint.toString(),
+      });
+      return;
+    }
 
     consensus.proposeAttestation({
       type: 'mint',
@@ -154,6 +192,24 @@ async function main(): Promise<void> {
       burnId: event.burnId,
       amount: event.amount.toString(),
     });
+
+    // M-2: Enforce rate limits before processing unlock
+    const amountBigint = BigInt(event.amount);
+    if (amountBigint > config.maxSingleTxLamports) {
+      logger.warn('Unlock exceeds single-tx limit — rejecting', {
+        burnId: event.burnId,
+        amount: amountBigint.toString(),
+        max: config.maxSingleTxLamports.toString(),
+      });
+      return;
+    }
+    if (!rateLimiter.tryConsume(amountBigint)) {
+      logger.error('RATE LIMIT: Daily outflow limit would be exceeded — rejecting unlock', {
+        burnId: event.burnId,
+        amount: amountBigint.toString(),
+      });
+      return;
+    }
 
     consensus.proposeAttestation({
       type: 'unlock',
@@ -363,7 +419,7 @@ async function submitUnlockToSolana(
     domainSeparator,
     transferIdBytes.length === 32 ? transferIdBytes : Buffer.alloc(32),
     recipientPubkey.toBuffer(),
-    Buffer.from(new BigInt64Array([BigInt(amount)]).buffer), // amount as u64 LE
+    Buffer.from(new BigUint64Array([BigInt(amount)]).buffer), // amount as u64 LE (unsigned)
     burnTxHash.length === 32 ? burnTxHash : Buffer.alloc(32),
     Buffer.from(new Uint32Array([config.dccChainId]).buffer), // dcc_chain_id as u32 LE
     Buffer.from(new BigInt64Array([BigInt(expiration)]).buffer), // expiration as i64 LE

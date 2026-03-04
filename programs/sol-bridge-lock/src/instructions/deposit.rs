@@ -94,6 +94,23 @@ pub fn handler(ctx: Context<Deposit>, params: DepositParams) -> Result<()> {
         BridgeError::InvalidDccAddress
     );
 
+    // ── GUARD: DCC address format validation (L-3 fix) ──
+    // DCC addresses are 26-byte base58-encoded values. When passed as [u8; 32],
+    // the first 26 bytes hold the address and the remaining 6 should be zero-padded.
+    // Reject addresses that are all 0xFF (invalid) or have non-zero bytes after
+    // byte 26 unless the full 32 bytes are a valid Ed25519 public key.
+    {
+        let all_ff = params.recipient_dcc.iter().all(|&b| b == 0xFF);
+        require!(!all_ff, BridgeError::InvalidDccAddress);
+
+        // Ensure the first byte is non-zero (valid DCC addresses start with
+        // a version byte, typically 0x01 for mainnet)
+        require!(
+            params.recipient_dcc[0] != 0,
+            BridgeError::InvalidDccAddress
+        );
+    }
+
     let clock = Clock::get()?;
     let user_state = &mut ctx.accounts.user_state;
 

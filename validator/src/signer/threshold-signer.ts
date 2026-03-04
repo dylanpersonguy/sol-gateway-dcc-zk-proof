@@ -226,14 +226,15 @@ export class ThresholdSigner {
     if (dir && !fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(this.config.privateKeyPath, data);
+    fs.writeFileSync(this.config.privateKeyPath, data, { mode: 0o600 });
 
     // Only write .key file if env var not provided (backward-compat / dev mode)
     if (!envKey) {
       this.logger.warn('SIGNER_ENCRYPTION_KEY env var not set — writing encryption key to disk (not recommended for production)');
       fs.writeFileSync(
         this.config.privateKeyPath + '.key',
-        encryptionKey.toString('hex')
+        encryptionKey.toString('hex'),
+        { mode: 0o600 }
       );
     }
   }

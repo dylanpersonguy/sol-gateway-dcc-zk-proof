@@ -1,0 +1,8 @@
+1,1,0,main.public_hash
+2,2,0,main.amount
+3,3,0,main.recipient
+4,4,0,main.version
+5,-1,0,main.secret_a
+6,-1,0,main.secret_b
+7,5,0,main.ab
+8,-1,0,main.computed_hash
