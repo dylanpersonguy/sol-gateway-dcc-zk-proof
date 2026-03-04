@@ -14,9 +14,18 @@ import * as dcc from '@decentralchain/decentralchain-transactions';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { randomBytes, createCipheriv } from 'crypto';
 import * as nacl from 'tweetnacl';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const required = (key) => {
+  const value = process.env[key];
+  if (!value) throw new Error(`Missing required env var: ${key}`);
+  return value;
+};
 
 const NODE     = 'https://keough-node.decentralchain.io';
-const SEED0    = '***REDACTED_SEED_PHRASE***';
+const SEED0    = required('DCC_VALIDATOR_SEED');
 const CHAIN_ID = '?';
 
 const addr0   = dcc.libs.crypto.address(SEED0, CHAIN_ID);

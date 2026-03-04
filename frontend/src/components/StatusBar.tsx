@@ -15,8 +15,23 @@ export function StatusBar() {
     };
 
     fetchStats();
-    const interval = setInterval(fetchStats, 30000);
-    return () => clearInterval(interval);
+    let interval = setInterval(fetchStats, 30000);
+
+    // Pause polling when tab is hidden to save bandwidth
+    const onVisibility = () => {
+      if (document.hidden) {
+        clearInterval(interval);
+      } else {
+        fetchStats();
+        interval = setInterval(fetchStats, 30000);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   return (
@@ -24,7 +39,7 @@ export function StatusBar() {
       <div className="max-w-6xl mx-auto px-4 py-2 flex items-center justify-between text-xs text-gray-500">
         <div className="flex items-center gap-6">
           <span>TVL: {stats?.vaultBalance || '—'} SOL</span>
-          <span>wSOL Supply: {stats?.wsolSupply || '—'}</span>
+          <span>SOL Supply: {stats?.wsolSupply || '—'}</span>
           <span>Transfers: {stats?.totalTransfers || '—'}</span>
         </div>
         <div className="flex items-center gap-4">

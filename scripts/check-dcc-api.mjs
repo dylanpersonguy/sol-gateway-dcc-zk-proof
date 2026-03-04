@@ -1,7 +1,17 @@
 import * as dcc from '@decentralchain/decentralchain-transactions';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const required = (key) => {
+	const value = process.env[key];
+	if (!value) throw new Error(`Missing required env var: ${key}`);
+	return value;
+};
+
 const keys = Object.keys(dcc);
 console.log('Exports:', keys.join(', '));
-const seed = '***REDACTED_SEED_PHRASE***';
+const seed = required('DCC_VALIDATOR_SEED');
 const chainId = '?'; // DCC mainnet
 // Derive two addresses:
 const addr1 = dcc.libs.crypto.address(seed, chainId);

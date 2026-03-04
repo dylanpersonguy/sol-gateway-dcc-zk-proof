@@ -1,0 +1,10 @@
+require:
+  - tsx
+
+spec:
+  - "unit/**/*.test.ts"
+  - "adversarial/**/*.test.ts"
+
+timeout: 30000
+recursive: true
+exit: true

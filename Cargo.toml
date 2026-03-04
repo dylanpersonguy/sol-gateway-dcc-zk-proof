@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "programs/sol-bridge-lock"
+    "programs/sol-bridge-lock",
+    "programs/checkpoint_registry",
 ]
 resolver = "2"
 

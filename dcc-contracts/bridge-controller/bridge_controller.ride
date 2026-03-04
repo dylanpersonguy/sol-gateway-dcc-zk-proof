@@ -43,7 +43,7 @@ let nativeSolMint = "So11111111111111111111111111111111111111112"
 func keyAdmin() = "admin"
 func keyGuardian() = "guardian"
 func keyPaused() = "paused"
-func keyWsolAssetId() = "wsol_asset_id"
+func keyWsolAssetId() = "sol_asset_id"
 func keyTotalMinted() = "total_minted"
 func keyTotalBurned() = "total_burned"
 func keyGlobalNonce() = "global_nonce"
@@ -178,6 +178,7 @@ func verifyValidatorSignatures(
 ) = {
     let count = size(signatures)
     if (count < minRequired) then throw("Insufficient signatures: " + count.toString() + " < " + minRequired.toString())
+    else if (count != size(pubkeys)) then throw("Signatures/pubkeys length mismatch")
     else {
         func verifyOne(acc: Int, idx: Int) = {
             if (idx >= count) then acc
@@ -240,8 +241,8 @@ func initialize(
     if (isDefined(getString(this, keyAdmin()))) then throw("Already initialized")
     else if (minValidators < minValidatorThreshold) then throw("Min validators too low")
     else {
-        # Issue wSOL.DCC — the wrapped native SOL asset
-        let wsolIssue = Issue("Wrapped SOL", "Wrapped SOL bridged from Solana via sol-gateway-dcc", 0, 8, true)
+        # Issue SOL.DCC — the bridged native SOL asset
+        let wsolIssue = Issue("Solana", "Solana native token (SOL) — bridged from Solana to DecentralChain via sol-gateway-dcc", 0, 8, true)
         let wsolAssetId = toBase58String(calculateAssetId(wsolIssue))
         [
             wsolIssue,
@@ -261,7 +262,7 @@ func initialize(
             IntegerEntry(keyRegisteredTokenCount(), 1),
             # Register native SOL in token registry
             StringEntry(keyTokenAssetId(nativeSolMint), wsolAssetId),
-            StringEntry(keyTokenName(nativeSolMint), "Wrapped SOL"),
+            StringEntry(keyTokenName(nativeSolMint), "SOL"),
             IntegerEntry(keyTokenSolDecimals(nativeSolMint), 9),
             IntegerEntry(keyTokenDccDecimals(nativeSolMint), 8),
             IntegerEntry(keyTokenDecimalDivisor(nativeSolMint), 10),
@@ -278,8 +279,8 @@ func initialize(
 
 # Register a new SPL token — issues a wrapped DCC asset
 # splMint:     Solana mint address (base58)
-# tokenName:   e.g. "Wrapped USDC"
-# tokenSymbol: short name for DCC Issue, e.g. "wUSDC"
+# tokenName:   e.g. "USDC"
+# tokenSymbol: short name for DCC Issue, e.g. "USDC"
 # tokenDesc:   description string
 # solDecimals: decimals on Solana (e.g. 6 for USDC)
 # dccDecimals: decimals on DCC (max 8)
@@ -319,7 +320,7 @@ func registerToken(
                 else if (diff == 10) then 10000000000
                 else throw("Decimal difference too large: " + diff.toString())
 
-            let tokenIssue = Issue(tokenSymbol, tokenDesc, 0, dccDecimals, true)
+            let tokenIssue = Issue(tokenName, tokenDesc, 0, dccDecimals, true)
             let dccAssetId = toBase58String(calculateAssetId(tokenIssue))
             [
                 tokenIssue,
@@ -409,9 +410,19 @@ func mintToken(
     else if (!isTokenEnabled(splMint)) then throw("Token is disabled: " + splMint)
     else if (amount < minMintAmount) then throw("Amount below minimum")
     else {
+        let maxSingle = match getInteger(this, keyMaxSingleMint()) {
+            case m: Int => m
+            case _ => maxSingleMint
+        }
+        if (amount > maxSingle) then throw("Single mint limit exceeded")
+        else {
         let minRequired = getMinValidators()
         let sigCount = size(signatures)
         if (sigCount < minRequired) then throw("Insufficient signatures")
+        else if (!verifyValidatorSignatures(
+            toBytes(constructMintMessage(transferId, recipient, amount, solSlot, splMint, dccChainId)),
+            signatures, pubkeys, minRequired
+        )) then throw("Invalid validator signatures")
         else {
             let (newDailyMinted, newResetHeight) = checkDailyLimit(amount)
             
@@ -453,6 +464,7 @@ func mintToken(
                 }
             }
         }
+        }
     }
 }
 
@@ -470,9 +482,19 @@ func mint(
     else if (isTransferProcessed(transferId)) then throw("Transfer already processed: " + transferId)
     else if (amount < minMintAmount) then throw("Amount below minimum")
     else {
+        let maxSingle = match getInteger(this, keyMaxSingleMint()) {
+            case m: Int => m
+            case _ => maxSingleMint
+        }
+        if (amount > maxSingle) then throw("Single mint limit exceeded")
+        else {
         let minRequired = getMinValidators()
         let sigCount = size(signatures)
         if (sigCount < minRequired) then throw("Insufficient signatures")
+        else if (!verifyValidatorSignatures(
+            toBytes(constructLegacyMintMessage(transferId, recipient, amount, solSlot, dccChainId)),
+            signatures, pubkeys, minRequired
+        )) then throw("Invalid validator signatures")
         else {
             let (newDailyMinted, newResetHeight) = checkDailyLimit(amount)
             let wsolAssetId = getStringValue(this, keyWsolAssetId())
@@ -498,6 +520,7 @@ func mint(
                     IntegerEntry(keyDailyResetHeight(), newResetHeight)
                 ]
             }
+        }
         }
     }
 }
@@ -595,7 +618,7 @@ func burnToken(solRecipient: String, splMint: String) = {
     }
 }
 
-# Legacy burn() — backward compat for wSOL only
+# Legacy burn() — backward compat for SOL only
 @Callable(i)
 func burn(solRecipient: String) = {
     if (isPaused()) then throw("Bridge is paused")
@@ -603,8 +626,8 @@ func burn(solRecipient: String) = {
         let wsolAssetId = getStringValue(this, keyWsolAssetId())
         let payment = i.payments[0]
         
-        if (!isDefined(payment.assetId)) then throw("Must attach wSOL.DCC token")
-        else if (toBase58String(payment.assetId.value()) != wsolAssetId) then throw("Wrong token — must be wSOL.DCC")
+        if (!isDefined(payment.assetId)) then throw("Must attach SOL.DCC token")
+        else if (toBase58String(payment.assetId.value()) != wsolAssetId) then throw("Wrong token — must be SOL.DCC")
         else if (payment.amount < minMintAmount) then throw("Burn amount below minimum")
         else {
             let userNonce = match getInteger(this, keyBurnNonce(i.caller.toString())) {

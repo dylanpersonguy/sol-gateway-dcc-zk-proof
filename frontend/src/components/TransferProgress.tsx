@@ -8,8 +8,8 @@ const STEPS = {
   sol_to_dcc: [
     { key: 'pending_confirmation', label: 'Confirming on Solana', description: 'Waiting for 32+ block confirmations' },
     { key: 'awaiting_consensus', label: 'Validator Consensus', description: 'Validators verifying your deposit' },
-    { key: 'minting', label: 'Minting wSOL.DCC', description: 'Creating wrapped SOL on DecentralChain' },
-    { key: 'completed', label: 'Complete', description: 'wSOL.DCC delivered to your wallet' },
+    { key: 'minting', label: 'Minting SOL on DCC', description: 'Creating bridged SOL on DecentralChain' },
+    { key: 'completed', label: 'Complete', description: 'SOL.DCC delivered to your wallet' },
   ],
   dcc_to_sol: [
     { key: 'pending_confirmation', label: 'Confirming Burn', description: 'Waiting for DCC confirmations' },
@@ -23,19 +23,44 @@ export function TransferProgress() {
   const { activeTransfer, clearActiveTransfer } = useBridgeStore();
   const [pollCount, setPollCount] = useState(0);
 
-  // Poll for status updates
+  // Poll for status updates (pauses when tab is hidden)
   useEffect(() => {
     if (!activeTransfer || activeTransfer.status === 'completed' || activeTransfer.status === 'failed') {
       return;
     }
 
-    const interval = setInterval(() => {
+    const fetchStatus = async () => {
+      try {
+        const data = await bridgeApi.getTransfer(activeTransfer.transferId);
+        if (data?.status && data.status !== activeTransfer.status) {
+          useBridgeStore.getState().updateTransferStatus(data.status);
+        }
+      } catch {
+        // Non-critical — next tick will retry
+      }
       setPollCount((c) => c + 1);
-      // In production: poll the API for actual status
-      // bridgeApi.getTransfer(activeTransfer.transferId)
-    }, 5000);
+    };
 
-    return () => clearInterval(interval);
+    let interval: ReturnType<typeof setInterval>;
+    const startPolling = () => {
+      interval = setInterval(fetchStatus, 5000);
+    };
+    fetchStatus(); // immediate first fetch
+    startPolling();
+
+    const onVisibility = () => {
+      clearInterval(interval);
+      if (!document.hidden) {
+        fetchStatus();
+        startPolling();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [activeTransfer]);
 
   if (!activeTransfer) return null;

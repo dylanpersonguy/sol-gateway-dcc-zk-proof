@@ -18,14 +18,24 @@ import {
   broadcast,
   libs,
 } from '@decentralchain/decentralchain-transactions';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const ROOT   = __dir;  // deploy-dcc.mjs lives at the project root
 
 // ── Config ─────────────────────────────────────────────────────────────────────
-const NODE_URL   = 'https://keough-node.decentralchain.io';
-const CHAIN_ID   = '?';   // DCC mainnet byte (63)
-const BASE_SEED  = '***REDACTED_SEED_PHRASE***';
+const required = (key) => {
+  const value = process.env[key];
+  if (!value) throw new Error(`Missing required env var: ${key}`);
+  return value;
+};
+
+const NODE_URL   = process.env.DCC_NODE_URL || 'https://keough-node.decentralchain.io';
+const CHAIN_ID   = process.env.DCC_CHAIN_ID_CHAR || '?';
+const BASE_SEED  = required('DCC_VALIDATOR_SEED');
+const BASE_NONCE = parseInt(process.env.DCC_VALIDATOR_NONCE || '0', 10);
 
 const MIN_VALIDATORS = 1; // start with 1 for testing
 
@@ -66,7 +76,7 @@ async function waitForTx(txId, attempts = 30) {
 const { address, publicKey, privateKey, seedWithNonce } = libs.crypto;
 
 // seedWithNonce(seed, 0) gives the primary account (3DiwY...)
-const SEED_WITH_NONCE = seedWithNonce(BASE_SEED, 0);
+const SEED_WITH_NONCE = seedWithNonce(BASE_SEED, BASE_NONCE);
 const SIGNER = { privateKey: privateKey(SEED_WITH_NONCE) };
 
 const deployerKeys = {

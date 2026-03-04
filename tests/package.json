@@ -1,0 +1,26 @@
+{
+  "name": "@sol-gateway-dcc/tests",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "mocha --config .mocharc.yml e2e/**/*.test.ts",
+    "test:security": "mocha --config .mocharc.yml security/**/*.test.ts",
+    "test:unit": "mocha --config .mocharc.yml unit/**/*.test.ts",
+    "test:adversarial": "mocha --config .mocharc.yml adversarial/**/*.test.ts",
+    "test:zk-bridge": "mocha --config .mocharc.yml unit/**/*.test.ts adversarial/**/*.test.ts",
+    "test": "mocha --config .mocharc.yml 'unit/**/*.test.ts' 'adversarial/**/*.test.ts'"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.11.0",
+    "chai": "^6.2.2",
+    "mocha": "^11.7.5",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

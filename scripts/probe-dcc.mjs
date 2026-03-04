@@ -1,6 +1,15 @@
 import { libs } from '@decentralchain/decentralchain-transactions';
+import dotenv from 'dotenv';
 
-const seed = '***REDACTED_SEED_PHRASE***';
+dotenv.config();
+
+const required = (key) => {
+  const value = process.env[key];
+  if (!value) throw new Error(`Missing required env var: ${key}`);
+  return value;
+};
+
+const seed = required('DCC_VALIDATOR_SEED');
 
 // Try testnet node - get its chain info first
 const testnet = 'https://testnet-node.decentralchain.io';

@@ -167,7 +167,7 @@ async function checkSupplyInvariant(detector: AnomalyDetector): Promise<void> {
     const vaultBalance = await solanaConnection.getBalance(vaultPda);
 
     // Query DCC wSOL supply from the DCC node
-    const dccNodeUrl = process.env.DCC_NODE_URL || 'http://localhost:6869';
+    const dccNodeUrl = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
     const dccBridgeContract = process.env.DCC_BRIDGE_CONTRACT || '';
 
     let wsolSupply = BigInt(0);
@@ -224,7 +224,7 @@ async function checkChainHealth(detector: AnomalyDetector): Promise<void> {
     const solLatency = Date.now() - solStart;
 
     // Measure DCC latency
-    const dccNodeUrl = process.env.DCC_NODE_URL || 'http://localhost:6869';
+    const dccNodeUrl = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
     const dccStart = Date.now();
     let dccHeight = 0;
     try {
@@ -356,29 +356,39 @@ async function triggerEmergencyPause(alert: AnomalyAlert): Promise<void> {
     logger.error('Failed to pause Solana bridge', { error: err.message });
   }
 
-  // Attempt to pause DCC bridge
+  // Attempt to pause DCC bridge (signed transaction)
   try {
-    const dccNodeUrl = process.env.DCC_NODE_URL || 'http://localhost:6869';
+    const dccNodeUrl = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
     const dccBridgeContract = process.env.DCC_BRIDGE_CONTRACT || '';
+    const dccGuardianSeed = process.env.DCC_GUARDIAN_SEED;
+    const dccChainIdChar = process.env.DCC_CHAIN_ID_CHAR || '?';
 
-    // Broadcast a pause invoke-script to DCC
-    const pausePayload = {
-      type: 16,
-      dApp: dccBridgeContract,
-      call: {
-        function: 'pause',
-        args: [
-          { type: 'string', value: alert.message },
-        ],
-      },
-      payment: [],
-      fee: 500000,
-    };
+    if (!dccGuardianSeed) {
+      logger.error('No DCC_GUARDIAN_SEED configured — cannot auto-pause DCC');
+    } else {
+      const { invokeScript } = await import('@decentralchain/decentralchain-transactions');
 
-    await axios.post(`${dccNodeUrl}/transactions/broadcast`, pausePayload, {
-      timeout: 15000,
-    });
-    logger.info('DCC emergency pause submitted');
+      const signedTx = invokeScript(
+        {
+          dApp: dccBridgeContract,
+          call: {
+            function: 'pause',
+            args: [
+              { type: 'string', value: alert.message.slice(0, 200) },
+            ],
+          },
+          payment: [],
+          fee: 500000,
+          chainId: dccChainIdChar,
+        },
+        dccGuardianSeed,
+      );
+
+      await axios.post(`${dccNodeUrl}/transactions/broadcast`, signedTx, {
+        timeout: 15000,
+      });
+      logger.info('DCC emergency pause submitted (signed)', { txId: (signedTx as any).id });
+    }
   } catch (err: any) {
     logger.error('Failed to pause DCC bridge', { error: err.message });
   }

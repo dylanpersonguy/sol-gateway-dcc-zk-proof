@@ -22,6 +22,7 @@ import { transferRouter } from './routes/transfer';
 import { redeemRouter } from './routes/redeem';
 import { healthRouter } from './routes/health';
 import { statsRouter } from './routes/stats';
+import { adminRouter } from './routes/admin';
 import { errorHandler } from './middleware/error-handler';
 import { requestLogger } from './middleware/request-logger';
 import { createLogger } from './utils/logger';
@@ -73,6 +74,7 @@ async function main(): Promise<void> {
   app.use('/api/v1/redeem', depositLimiter, redeemRouter);
   app.use('/api/v1/health', healthRouter);
   app.use('/api/v1/stats', statsRouter);
+  app.use('/api/v1/admin', adminRouter);
 
   // ── Error Handling ──
   app.use(errorHandler);
@@ -82,10 +84,13 @@ async function main(): Promise<void> {
     logger.info(`Bridge API server running on port ${PORT}`);
     logger.info('Endpoints:');
     logger.info(`  POST /api/v1/deposit     — Generate deposit instruction`);
+    logger.info(`  POST /api/v1/deposit/spl — Generate SPL deposit instruction`);
     logger.info(`  GET  /api/v1/transfer/:id — Get transfer status`);
+    logger.info(`  GET  /api/v1/transfer/:id/stream — SSE real-time updates`);
     logger.info(`  POST /api/v1/redeem       — Generate redeem instruction`);
     logger.info(`  GET  /api/v1/health       — Bridge health status`);
     logger.info(`  GET  /api/v1/stats        — Bridge statistics`);
+    logger.info(`  GET  /api/v1/admin/*      — Admin dashboard (key required)`);
   });
 }
 

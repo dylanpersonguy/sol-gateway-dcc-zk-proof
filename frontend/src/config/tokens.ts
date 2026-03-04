@@ -8,7 +8,7 @@ export interface BridgeToken {
   splMint: string;
   /** Display symbol on Solana side (e.g. "SOL", "USDC") */
   symbol: string;
-  /** Wrapped symbol on DCC side (e.g. "wSOL", "wUSDC") */
+  /** Symbol on DCC side (e.g. "SOL", "USDC") */
   wrappedSymbol: string;
   /** Full token name */
   name: string;
@@ -30,7 +30,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'So11111111111111111111111111111111111111112',
     symbol: 'SOL',
-    wrappedSymbol: 'wSOL',
+    wrappedSymbol: 'SOL',
     name: 'Solana',
     solDecimals: 9,
     dccDecimals: 8,
@@ -42,7 +42,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
     symbol: 'USDC',
-    wrappedSymbol: 'wUSDC',
+    wrappedSymbol: 'USDC',
     name: 'USD Coin',
     solDecimals: 6,
     dccDecimals: 6,
@@ -52,7 +52,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
     symbol: 'USDT',
-    wrappedSymbol: 'wUSDT',
+    wrappedSymbol: 'USDT',
     name: 'Tether USD',
     solDecimals: 6,
     dccDecimals: 6,
@@ -62,7 +62,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo',
     symbol: 'PYUSD',
-    wrappedSymbol: 'wPYUSD',
+    wrappedSymbol: 'PYUSD',
     name: 'PayPal USD',
     solDecimals: 6,
     dccDecimals: 6,
@@ -72,7 +72,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
     symbol: 'DAI',
-    wrappedSymbol: 'wDAI',
+    wrappedSymbol: 'DAI',
     name: 'Dai (Wormhole)',
     solDecimals: 8,
     dccDecimals: 8,
@@ -84,7 +84,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh',
     symbol: 'BTC',
-    wrappedSymbol: 'wBTC',
+    wrappedSymbol: 'BTC',
     name: 'Bitcoin (Wormhole)',
     solDecimals: 8,
     dccDecimals: 8,
@@ -94,8 +94,8 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij',
     symbol: 'cbBTC',
-    wrappedSymbol: 'wcbBTC',
-    name: 'Coinbase Wrapped BTC',
+    wrappedSymbol: 'cbBTC',
+    name: 'Coinbase BTC',
     solDecimals: 8,
     dccDecimals: 8,
     logoURI: 'https://assets.coingecko.com/coins/images/40143/small/cbbtc.webp',
@@ -104,7 +104,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: '6DNSN2BJsaPFdBAy8hkkkJ9QK64kAr7MRZGP9mLqPzQq',
     symbol: 'tBTC',
-    wrappedSymbol: 'wtBTC',
+    wrappedSymbol: 'tBTC',
     name: 'Threshold BTC',
     solDecimals: 8,
     dccDecimals: 8,
@@ -116,7 +116,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs',
     symbol: 'ETH',
-    wrappedSymbol: 'wETH',
+    wrappedSymbol: 'ETH',
     name: 'Ether (Wormhole)',
     solDecimals: 8,
     dccDecimals: 8,
@@ -128,7 +128,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn',
     symbol: 'JitoSOL',
-    wrappedSymbol: 'wJitoSOL',
+    wrappedSymbol: 'JitoSOL',
     name: 'Jito Staked SOL',
     solDecimals: 9,
     dccDecimals: 8,
@@ -138,7 +138,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',
     symbol: 'JUP',
-    wrappedSymbol: 'wJUP',
+    wrappedSymbol: 'JUP',
     name: 'Jupiter',
     solDecimals: 6,
     dccDecimals: 6,
@@ -148,7 +148,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R',
     symbol: 'RAY',
-    wrappedSymbol: 'wRAY',
+    wrappedSymbol: 'RAY',
     name: 'Raydium',
     solDecimals: 6,
     dccDecimals: 6,
@@ -158,7 +158,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3',
     symbol: 'PYTH',
-    wrappedSymbol: 'wPYTH',
+    wrappedSymbol: 'PYTH',
     name: 'Pyth Network',
     solDecimals: 6,
     dccDecimals: 6,
@@ -168,7 +168,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof',
     symbol: 'RNDR',
-    wrappedSymbol: 'wRNDR',
+    wrappedSymbol: 'RNDR',
     name: 'Render Token',
     solDecimals: 8,
     dccDecimals: 8,
@@ -180,7 +180,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
     symbol: 'BONK',
-    wrappedSymbol: 'wBONK',
+    wrappedSymbol: 'BONK',
     name: 'Bonk',
     solDecimals: 5,
     dccDecimals: 5,
@@ -190,7 +190,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: 'pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn',
     symbol: 'PUMP',
-    wrappedSymbol: 'wPUMP',
+    wrappedSymbol: 'PUMP',
     name: 'Pump.fun',
     solDecimals: 6,
     dccDecimals: 6,
@@ -200,7 +200,7 @@ export const BRIDGE_TOKENS: BridgeToken[] = [
   {
     splMint: '2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv',
     symbol: 'PENGU',
-    wrappedSymbol: 'wPENGU',
+    wrappedSymbol: 'PENGU',
     name: 'Pudgy Penguins',
     solDecimals: 6,
     dccDecimals: 6,

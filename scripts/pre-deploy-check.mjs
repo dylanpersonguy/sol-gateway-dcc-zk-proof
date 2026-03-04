@@ -3,9 +3,18 @@
  */
 import * as dcc from '@decentralchain/decentralchain-transactions';
 import { readFileSync } from 'fs';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const required = (key) => {
+  const value = process.env[key];
+  if (!value) throw new Error(`Missing required env var: ${key}`);
+  return value;
+};
 
 const NODE = 'https://keough-node.decentralchain.io';
-const SEED = '***REDACTED_SEED_PHRASE***';
+const SEED = required('DCC_VALIDATOR_SEED');
 const CHAIN_ID = '?';
 
 const addr0 = dcc.libs.crypto.address(SEED, CHAIN_ID);

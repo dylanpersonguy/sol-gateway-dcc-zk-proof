@@ -1,0 +1,138 @@
+[
+  {
+    "symbol": "SOL",
+    "splMint": "So11111111111111111111111111111111111111112",
+    "dccAssetId": "AFpkMV8xmEf8F7n8Pk6T57ddeQCoCwmsA1aJQEtgF6gz",
+    "cid": "bafybeieferog44od4hime2zpn33ku4tmwdmuoxsw2pqxzihrkbl2d26gc4",
+    "ipfsUrl": "ipfs://bafybeieferog44od4hime2zpn33ku4tmwdmuoxsw2pqxzihrkbl2d26gc4",
+    "status": "pinned"
+  },
+  {
+    "symbol": "USDC",
+    "splMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "dccAssetId": "3NHSacmz4SvsWc2MKVWoueWjBRuxgSCoiPKhzr72fzFX",
+    "cid": "bafybeiduqwqggmvwkxkjdcptqdj3l6gbfxaridkljvfsdag5lfk6vik4bi",
+    "ipfsUrl": "ipfs://bafybeiduqwqggmvwkxkjdcptqdj3l6gbfxaridkljvfsdag5lfk6vik4bi",
+    "status": "pinned"
+  },
+  {
+    "symbol": "USDT",
+    "splMint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    "dccAssetId": "4iANVzuhbumV3xKptNYLF7uycigpQiieYRX4ac6uQsND",
+    "cid": "bafybeiabcb7r4z3wc2ik7p54xmszcxzqglpweo4dg7vodluabjtn5xnonu",
+    "ipfsUrl": "ipfs://bafybeiabcb7r4z3wc2ik7p54xmszcxzqglpweo4dg7vodluabjtn5xnonu",
+    "status": "pinned"
+  },
+  {
+    "symbol": "PYUSD",
+    "splMint": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    "dccAssetId": "UD4JTovLMwQZTni1tzZPXSqXCGN9Nf3NWZpFeUbKohm",
+    "cid": "bafybeiacrq2dqkk5jbxakrfsgqub4luek6uk4brzipxj7hmsfkblsaga5y",
+    "ipfsUrl": "ipfs://bafybeiacrq2dqkk5jbxakrfsgqub4luek6uk4brzipxj7hmsfkblsaga5y",
+    "status": "pinned"
+  },
+  {
+    "symbol": "DAI",
+    "splMint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+    "dccAssetId": "Fgr6ZCTqZ8dS4VibeHtBSpucbxc33XNzFzLda8eYKpen",
+    "cid": "bafybeiciooarryaj2h4uufn4g5uz2rkpqeamrsntot53xwq7b3pxb22yfe",
+    "ipfsUrl": "ipfs://bafybeiciooarryaj2h4uufn4g5uz2rkpqeamrsntot53xwq7b3pxb22yfe",
+    "status": "pinned"
+  },
+  {
+    "symbol": "BTC",
+    "splMint": "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
+    "dccAssetId": "36x8YZGUk9BvtJVSCP6dZ6cT3aTBat6A5co32D2pcWrx",
+    "cid": "bafybeia4jv5jzupr7g43xuah4zjsbprwrh4q7nwwik3vvjbqo7lhb3vpdy",
+    "ipfsUrl": "ipfs://bafybeia4jv5jzupr7g43xuah4zjsbprwrh4q7nwwik3vvjbqo7lhb3vpdy",
+    "status": "pinned"
+  },
+  {
+    "symbol": "cbBTC",
+    "splMint": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
+    "dccAssetId": "7fAQojQbLSuYPgSdvfjL9wifVkwkni4cMCoUTQUdT6hL",
+    "cid": "bafybeianxjbpwbwxqpggpzppljjtiudwv7xtyoaflcpnrn6r253nwlsm5i",
+    "ipfsUrl": "ipfs://bafybeianxjbpwbwxqpggpzppljjtiudwv7xtyoaflcpnrn6r253nwlsm5i",
+    "status": "pinned"
+  },
+  {
+    "symbol": "tBTC",
+    "splMint": "6DNSN2BJsaPFdBAy8hkkkJ9QK64kAr7MRZGP9mLqPzQq",
+    "dccAssetId": "EZ8fTuoYC4p1LXiGigL4wZss12mEBNucDWHz6M3K3GKt",
+    "cid": "bafybeid572by7elejqp3lqaalvh2gqspekpyaawfjprk2datxo3z5n632e",
+    "ipfsUrl": "ipfs://bafybeid572by7elejqp3lqaalvh2gqspekpyaawfjprk2datxo3z5n632e",
+    "status": "pinned"
+  },
+  {
+    "symbol": "ETH",
+    "splMint": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+    "dccAssetId": "5cqaRPKx51LkRCnzd6Y1uqs1EA5yuGP842oUk5cNB8wN",
+    "cid": "bafybeibiaic5gw7y5iqta5frwkwvbq2tyno6ndjjz64tioux4pgfkm44pa",
+    "ipfsUrl": "ipfs://bafybeibiaic5gw7y5iqta5frwkwvbq2tyno6ndjjz64tioux4pgfkm44pa",
+    "status": "pinned"
+  },
+  {
+    "symbol": "JitoSOL",
+    "splMint": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
+    "dccAssetId": "AHJwuR6QDANu7SJof1VYHHHtcE5SqrnCg5YgfoJAVAmm",
+    "cid": "bafybeicc4wskkuo27mdkd2t3yfu63zywobwgb7sicsl3jwahvl4lcjqjo4",
+    "ipfsUrl": "ipfs://bafybeicc4wskkuo27mdkd2t3yfu63zywobwgb7sicsl3jwahvl4lcjqjo4",
+    "status": "pinned"
+  },
+  {
+    "symbol": "BONK",
+    "splMint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "dccAssetId": "2UG8n2xABi6VQWxCmhDTd1h5XRYMP9GWdh8Kgr7hMFk4",
+    "cid": "bafybeiapc3q7nt5x737ooiz4jlygzuoogce3zckvvm5q4q2sol3a4icwli",
+    "ipfsUrl": "ipfs://bafybeiapc3q7nt5x737ooiz4jlygzuoogce3zckvvm5q4q2sol3a4icwli",
+    "status": "pinned"
+  },
+  {
+    "symbol": "PUMP",
+    "splMint": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+    "dccAssetId": "12GHy9qJ92uiink6witjQwdcwKZkiPHnb8yqXAgQBnpP",
+    "cid": "bafybeid35qyqeackmhsflrt36tey5hosuda5xa6hz4vviefyub3s27n244",
+    "ipfsUrl": "ipfs://bafybeid35qyqeackmhsflrt36tey5hosuda5xa6hz4vviefyub3s27n244",
+    "status": "pinned"
+  },
+  {
+    "symbol": "JUP",
+    "splMint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+    "dccAssetId": "HL4wvZKM8uRyj5DEbPBYjvi1zfCeUoo8cTHAyxb6UdbJ",
+    "cid": "bafybeie4xlflywj56ud62o54x2casxrjryh7fhq3a5ja4yalxypsic6sse",
+    "ipfsUrl": "ipfs://bafybeie4xlflywj56ud62o54x2casxrjryh7fhq3a5ja4yalxypsic6sse",
+    "status": "pinned"
+  },
+  {
+    "symbol": "RAY",
+    "splMint": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+    "dccAssetId": "FvNm1ssinbGHSDUzgRAGyy3RGWgHoM5d1zkJ8quT4PYK",
+    "cid": "bafybeie53brd7tvknh5v35isf5kugejofvyl2odoajlezmzk3yq4ad7yhq",
+    "ipfsUrl": "ipfs://bafybeie53brd7tvknh5v35isf5kugejofvyl2odoajlezmzk3yq4ad7yhq",
+    "status": "pinned"
+  },
+  {
+    "symbol": "PYTH",
+    "splMint": "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",
+    "dccAssetId": "ECAL78VUZYRAxpWpC6n5fECAmR38jpKgZgBj9q9Ld9yZ",
+    "cid": "bafybeieavtm5spzuik7tg2dfqxfrk754ekftutmu26eumgkydvtu3idw4q",
+    "ipfsUrl": "ipfs://bafybeieavtm5spzuik7tg2dfqxfrk754ekftutmu26eumgkydvtu3idw4q",
+    "status": "pinned"
+  },
+  {
+    "symbol": "RNDR",
+    "splMint": "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof",
+    "dccAssetId": "EV4McBMjuJYs1nN57pEXta9DikccEUjKx7HSQhKBtoSK",
+    "cid": "bafybeiatvxrevrbyqnvz5o6ccpyxt5dwc7htss53c2lgtdlzntjqc2c7vu",
+    "ipfsUrl": "ipfs://bafybeiatvxrevrbyqnvz5o6ccpyxt5dwc7htss53c2lgtdlzntjqc2c7vu",
+    "status": "pinned"
+  },
+  {
+    "symbol": "PENGU",
+    "splMint": "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
+    "dccAssetId": "AiWR7Yq1swqgdm4EuhrDLXKuugEpdDr7AV5DT8oNhvmC",
+    "cid": "bafybeicrygtudovwkcq34qesnus3ovaik2yze2amitx2hromxd3pyfsrcq",
+    "ipfsUrl": "ipfs://bafybeicrygtudovwkcq34qesnus3ovaik2yze2amitx2hromxd3pyfsrcq",
+    "status": "pinned"
+  }
+]

@@ -144,6 +144,9 @@ pub struct DepositRecord {
     /// Unique transfer ID (hash of sender + nonce + slot)
     pub transfer_id: [u8; 32],
 
+    /// ZK bridge message ID = Keccak256(domain_sep || fields)
+    pub message_id: [u8; 32],
+
     /// Depositor's Solana public key
     pub sender: Pubkey,
 
@@ -159,8 +162,14 @@ pub struct DepositRecord {
     /// Solana slot at time of deposit
     pub slot: u64,
 
+    /// Event index within the checkpoint window
+    pub event_index: u32,
+
     /// Unix timestamp of deposit
     pub timestamp: i64,
+
+    /// Asset identifier (SPL mint or native SOL sentinel)
+    pub asset_id: Pubkey,
 
     /// Whether this deposit has been processed (minted on DCC)
     pub processed: bool,
@@ -172,12 +181,15 @@ pub struct DepositRecord {
 impl DepositRecord {
     pub const LEN: usize = 8  // discriminator
         + 32    // transfer_id
+        + 32    // message_id
         + 32    // sender
         + 32    // recipient_dcc
         + 8     // amount
         + 8     // nonce
         + 8     // slot
+        + 4     // event_index
         + 8     // timestamp
+        + 32    // asset_id
         + 1     // processed
         + 1;    // bump
 }

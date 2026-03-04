@@ -116,7 +116,7 @@ export class DccWatcher extends EventEmitter {
       // Check if this is an invoke script transaction targeting our bridge
       if (tx.type !== 16) return; // InvokeScript transaction type
       if (tx.dApp !== this.config.bridgeContract) return;
-      if (tx.call?.function !== 'burn') return;
+      if (tx.call?.function !== 'burn' && tx.call?.function !== 'burnToken') return;
 
       // Parse burn event from state changes
       const burnEvent = await this.parseBurnEvent(tx, height);

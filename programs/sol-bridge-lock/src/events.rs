@@ -5,11 +5,13 @@ use anchor_lang::prelude::*;
 /// ═══════════════════════════════════════════════════════════════
 
 /// Emitted when SOL is deposited into the bridge vault.
-/// Validators watch for this event to initiate minting on DCC.
+/// The ZK prover watches for this event and builds inclusion proofs.
 #[event]
 pub struct BridgeDeposit {
-    /// Globally unique transfer identifier
+    /// Globally unique transfer identifier (legacy, kept for index compatibility)
     pub transfer_id: [u8; 32],
+    /// ZK bridge message ID = Keccak256(domain_sep || fields)
+    pub message_id: [u8; 32],
     /// Depositor's Solana public key
     pub sender: Pubkey,
     /// Recipient address on DecentralChain
@@ -20,10 +22,16 @@ pub struct BridgeDeposit {
     pub nonce: u64,
     /// Solana slot at deposit time
     pub slot: u64,
+    /// Event index within the checkpoint window
+    pub event_index: u32,
     /// Unix timestamp
     pub timestamp: i64,
     /// Solana chain ID (domain separation)
-    pub chain_id: u32,
+    pub src_chain_id: u32,
+    /// DCC chain ID
+    pub dst_chain_id: u32,
+    /// Asset identifier (SPL mint or native SOL sentinel)
+    pub asset_id: Pubkey,
 }
 
 /// Emitted when SPL tokens are deposited into the bridge vault.

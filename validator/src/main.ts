@@ -16,6 +16,7 @@ import { SolanaWatcher, SolanaDepositEvent } from './watchers/solana-watcher';
 import { DccWatcher, DccBurnEvent } from './watchers/dcc-watcher';
 import { ConsensusEngine, ConsensusResult, Attestation } from './consensus/engine';
 import { ThresholdSigner } from './signer/threshold-signer';
+import { P2PTransport } from './p2p/transport';
 import { createLogger } from './utils/logger';
 import {
   Connection,
@@ -86,6 +87,46 @@ async function main(): Promise<void> {
     bridgeContract: config.dccBridgeContract,
     requiredConfirmations: config.dccRequiredConfirmations,
     pollIntervalMs: 3000,
+  });
+
+  // ── Initialize P2P Transport ──
+  const p2p = new P2PTransport({
+    nodeId: config.nodeId,
+    port: config.p2pPort,
+    bootstrapPeers: config.bootstrapPeers,
+    heartbeatIntervalMs: 10_000,
+    reconnectBaseMs: 2_000,
+    maxReconnectMs: 60_000,
+  });
+
+  // Wire P2P crypto with signer
+  p2p.setCrypto(
+    (msg: Buffer) => signer.sign(msg),
+    (msg: Buffer, sig: Buffer, pk: Buffer) => signer.verify(msg, sig, pk),
+    signer.getPublicKey(),
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // P2P ↔ CONSENSUS WIRING
+  // ═══════════════════════════════════════════════════════════
+
+  // When consensus broadcasts an attestation, relay it over P2P
+  consensus.on('attestation_broadcast', async (attestation: Attestation) => {
+    await p2p.broadcast('attestation', attestation);
+  });
+
+  // When we receive an attestation from a peer, feed it to consensus
+  p2p.on('attestation_received', (payload: any, fromNodeId: string) => {
+    const attestation: Attestation = {
+      nodeId: payload.nodeId || fromNodeId,
+      transferId: payload.transferId,
+      type: payload.type,
+      signature: Buffer.from(payload.signature, 'base64'),
+      publicKey: Buffer.from(payload.publicKey, 'base64'),
+      messageHash: Buffer.from(payload.messageHash, 'base64'),
+      timestamp: payload.timestamp,
+    };
+    consensus.receiveAttestation(attestation);
   });
 
   // ═══════════════════════════════════════════════════════════
@@ -173,6 +214,7 @@ async function main(): Promise<void> {
       dccWatcher: dccWatcher.getHealth(),
       consensus: consensus.getStatus(),
       signer: signer.getStats(),
+      p2p: { peers: p2p.getPeerStatus() },
       timestamp: Date.now(),
     };
     res.json(health);
@@ -208,25 +250,23 @@ async function main(): Promise<void> {
 
   await solanaWatcher.start();
   await dccWatcher.start();
+  await p2p.start();
 
   logger.info('Validator node fully operational');
   logger.info(`Public Key: ${signer.getPublicKey().toString('hex')}`);
+  logger.info(`P2P: ws://0.0.0.0:${config.p2pPort}`);
   logger.info(`Health: http://localhost:${config.healthCheckPort}/health`);
 
   // Graceful shutdown
-  process.on('SIGINT', async () => {
+  const shutdown = async () => {
     logger.info('Shutting down...');
+    await p2p.stop();
     await solanaWatcher.stop();
     await dccWatcher.stop();
     process.exit(0);
-  });
-
-  process.on('SIGTERM', async () => {
-    logger.info('Shutting down...');
-    await solanaWatcher.stop();
-    await dccWatcher.stop();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 // ═══════════════════════════════════════════════════════════════

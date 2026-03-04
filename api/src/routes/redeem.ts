@@ -4,6 +4,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import { PublicKey } from '@solana/web3.js';
 import { createLogger } from '../utils/logger';
 import {
   isValidDccAddress,
@@ -48,6 +49,12 @@ redeemRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
     // Validate DCC address
     if (!isValidDccAddress(sender)) {
       return res.status(400).json({ error: 'Invalid DCC address for sender' });
+    }
+
+    try {
+      new PublicKey(solRecipient);
+    } catch {
+      return res.status(400).json({ error: 'Invalid Solana recipient address' });
     }
 
     logger.info('Redeem request', { sender, solRecipient, amount });

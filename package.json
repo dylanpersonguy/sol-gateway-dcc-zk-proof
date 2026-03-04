@@ -8,7 +8,8 @@
     "api",
     "frontend",
     "monitoring",
-    "tests"
+    "tests",
+    "zk/prover"
   ],
   "scripts": {
     "postinstall": "node scripts/postinstall-fix-dcc.js",
@@ -20,11 +21,13 @@
     "monitoring:start": "cd monitoring && yarn start",
     "test:e2e": "cd tests && yarn test:e2e",
     "test:security": "cd tests && yarn test:security",
+    "test:zk-bridge": "cd tests && yarn test:zk-bridge",
     "lint": "eslint . --ext .ts,.tsx",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@coral-xyz/anchor": "^0.32.1",
+    "@solana/spl-token": "^0.4.14",
     "@types/bn.js": "^5.2.0",
     "@types/chai": "^5.2.3",
     "@types/mocha": "^10.0.10",

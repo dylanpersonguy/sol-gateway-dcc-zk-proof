@@ -16,9 +16,9 @@ export const DCC_TESTNET_CHAIN_ID = 'T';
 // ── Config loaded from env ──
 export function getDccConfig() {
   return {
-    nodeUrl: process.env.DCC_NODE_URL || 'https://testnet.decentralchain.io',
+    nodeUrl: process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io',
     bridgeContract: process.env.DCC_BRIDGE_CONTRACT || '',
-    wsolAssetId: process.env.WSOL_ASSET_ID || '',
+    wsolAssetId: process.env.SOL_ASSET_ID || process.env.WSOL_ASSET_ID || '',
     chainIdChar: process.env.DCC_CHAIN_ID_CHAR || '?',
   };
 }
@@ -118,6 +118,7 @@ export async function getBurnRecord(
 ): Promise<{
   sender: string;
   solRecipient: string;
+  splMint: string;
   amount: number;
   height: number;
   timestamp: number;
@@ -130,13 +131,14 @@ export async function getBurnRecord(
     );
     if (!entry || typeof entry.value !== 'string') return null;
     const parts = (entry.value as string).split('|');
-    if (parts.length < 5) return null;
+    if (parts.length < 6) return null;
     return {
       sender: parts[0],
       solRecipient: parts[1],
-      amount: parseInt(parts[2]),
-      height: parseInt(parts[3]),
-      timestamp: parseInt(parts[4]),
+      splMint: parts[2],
+      amount: parseInt(parts[3]),
+      height: parseInt(parts[4]),
+      timestamp: parseInt(parts[5]),
     };
   } catch {
     return null;

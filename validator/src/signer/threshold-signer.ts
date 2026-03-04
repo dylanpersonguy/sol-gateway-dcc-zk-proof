@@ -202,8 +202,11 @@ export class ThresholdSigner {
 
   private async saveEncryptedKey(keyPair: nacl.SignKeyPair): Promise<void> {
     // Encrypt the private key before saving to disk
-    // In production, use a proper KMS or passphrase-derived key
-    const encryptionKey = crypto.randomBytes(32);
+    // Use SIGNER_ENCRYPTION_KEY env var if available, otherwise generate random key and save to .key file
+    const envKey = process.env.SIGNER_ENCRYPTION_KEY;
+    const encryptionKey = envKey
+      ? Buffer.from(envKey, 'hex')
+      : crypto.randomBytes(32);
     const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey, iv);
 
@@ -225,20 +228,29 @@ export class ThresholdSigner {
     }
     fs.writeFileSync(this.config.privateKeyPath, data);
 
-    // Save encryption key separately (in production, use KMS)
-    fs.writeFileSync(
-      this.config.privateKeyPath + '.key',
-      encryptionKey.toString('hex')
-    );
+    // Only write .key file if env var not provided (backward-compat / dev mode)
+    if (!envKey) {
+      this.logger.warn('SIGNER_ENCRYPTION_KEY env var not set — writing encryption key to disk (not recommended for production)');
+      fs.writeFileSync(
+        this.config.privateKeyPath + '.key',
+        encryptionKey.toString('hex')
+      );
+    }
   }
 
   private decryptKeyPair(encryptedData: Buffer): nacl.SignKeyPair {
-    // Read encryption key
-    const keyHex = fs.readFileSync(
-      this.config.privateKeyPath + '.key',
-      'utf8'
-    );
-    const encryptionKey = Buffer.from(keyHex, 'hex');
+    // Prefer env var, fall back to .key file
+    const envKey = process.env.SIGNER_ENCRYPTION_KEY;
+    let encryptionKey: Buffer;
+    if (envKey) {
+      encryptionKey = Buffer.from(envKey, 'hex');
+    } else {
+      const keyHex = fs.readFileSync(
+        this.config.privateKeyPath + '.key',
+        'utf8'
+      );
+      encryptionKey = Buffer.from(keyHex, 'hex');
+    }
 
     const iv = encryptedData.subarray(0, 16);
     const authTag = encryptedData.subarray(16, 32);

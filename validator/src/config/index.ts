@@ -22,7 +22,7 @@ export interface ValidatorConfig {
   dccChainId: number;
   dccChainIdChar: string;   // '?' for mainnet (produces 3D... addresses)
   dccSeed: string;           // Validator's DCC seed phrase for signing mints
-  wsolAssetId: string;       // wSOL.DCC asset ID on DecentralChain
+  wsolAssetId: string;       // SOL.DCC asset ID on DecentralChain
 
   // ── Consensus ──
   minValidators: number;
@@ -73,7 +73,7 @@ export function loadConfig(): ValidatorConfig {
     dccChainId: parseInt(process.env.DCC_CHAIN_ID || '63'),
     dccChainIdChar: process.env.DCC_CHAIN_ID_CHAR || '?',
     dccSeed: requireEnv('DCC_VALIDATOR_SEED'),
-    wsolAssetId: requireEnv('WSOL_ASSET_ID'),
+    wsolAssetId: process.env.SOL_ASSET_ID || process.env.WSOL_ASSET_ID || requireEnv('SOL_ASSET_ID'),
 
     minValidators: parseInt(process.env.MIN_VALIDATORS || '3'),
     consensusTimeoutMs: parseInt(process.env.CONSENSUS_TIMEOUT_MS || '30000'),

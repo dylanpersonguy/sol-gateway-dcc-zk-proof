@@ -16,6 +16,7 @@ const {
   libs,
 } = require('@decentralchain/decentralchain-transactions');
 const fs = require('fs');
+require('dotenv').config();
 
 const { privateKey, publicKey, address, base58Decode } = libs.crypto;
 
@@ -34,7 +35,10 @@ const DCC_NODE         = 'http://localhost:6869';
 const DCC_CHAIN        = 'D';
 const BRIDGE_ADDR      = '3Fans4vfDrZD5vJCyNqkHHKVzPjqok5v6Ui';
 const BRIDGE_SEED      = 'bridge controller for sol-gateway-dcc local dev';
-const VALIDATOR_SEED   = '***REDACTED_SEED_PHRASE***';
+const VALIDATOR_SEED   = process.env.DCC_VALIDATOR_SEED;
+if (!VALIDATOR_SEED) {
+  throw new Error('Missing required env var: DCC_VALIDATOR_SEED');
+}
 const VALIDATOR_PUBKEY = publicKey(VALIDATOR_SEED);
 const WSOL_ASSET_ID    = '8AmLFgw5FXTuo6VegXrb8d1PZTx2Q8xD9Tn3kfEkfv5y';
 

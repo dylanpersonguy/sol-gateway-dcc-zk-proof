@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "commonjs",
+    "module": "ES2022",
     "moduleResolution": "node",
     "esModuleInterop": true,
     "strict": true,
@@ -9,5 +9,11 @@
     "rootDir": ".",
     "types": ["mocha", "chai", "node"]
   },
-  "include": ["e2e/**/*.ts", "security/**/*.ts"]
+  "include": [
+    "e2e/**/*.ts",
+    "security/**/*.ts",
+    "unit/**/*.ts",
+    "adversarial/**/*.ts",
+    "vectors/**/*.ts"
+  ]
 }

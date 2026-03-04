@@ -16,6 +16,7 @@
 const fs      = require('fs');
 const path    = require('path');
 const ROOT    = __dirname;
+require('dotenv').config();
 
 const {
   setScript,
@@ -37,7 +38,10 @@ const GENESIS_SEED_B58 = 'E8kZYpXnUTdo5Wy6FyNfvMW12fQ6WDFWXgs5a6MEz4thNg7hpudkAh
 const BRIDGE_SEED    = 'bridge controller for sol-gateway-dcc local dev';
 
 // Validator seed (from .env DCC_VALIDATOR_SEED)
-const VALIDATOR_SEED = '***REDACTED_SEED_PHRASE***';
+const VALIDATOR_SEED = process.env.DCC_VALIDATOR_SEED;
+if (!VALIDATOR_SEED) {
+  throw new Error('Missing required env var: DCC_VALIDATOR_SEED');
+}
 
 const MIN_VALIDATORS = 1;
 
