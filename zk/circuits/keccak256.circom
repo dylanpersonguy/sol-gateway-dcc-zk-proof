@@ -87,6 +87,17 @@ template Keccak256Bits(N) {
     var RATE = 1088;
     var num_blocks = (N + 1 + 1 + RATE - 1) \ RATE; // ceiling division after padding
     if (num_blocks == 0) { num_blocks = 1; }
+
+    // ═══════════════════════════════════════════════════════════
+    // FIX: §3.3 — Compile-time guard on absorb block count.
+    // This circuit only implements 1 or 2 absorb block sponge.
+    // If someone instantiates Keccak256Bits(N) with N > 2174,
+    // the circuit would silently produce incorrect results.
+    // This assertion halts compilation instead.
+    // Max safe N: 2 blocks × 1088 bits/block - 2 padding bits = 2174 bits
+    // ═══════════════════════════════════════════════════════════
+    assert(num_blocks <= 2);
+
     var PADDED_LEN = num_blocks * RATE;
     
     signal padded[PADDED_LEN];

@@ -69,6 +69,21 @@ func keyCheckpointActive(id: Int) = "checkpoint_" + id.toString() + "_active"
 func keyCheckpointHeight(id: Int) = "checkpoint_" + id.toString() + "_height"
 func keyNextCheckpointId() = "next_checkpoint_id"
 
+# ── Committee-based checkpoint approval (ATK-5 fix) ────────
+# The checkpoint committee is a set of independent validators that
+# must collectively approve each checkpoint before it goes live.
+# Quorum: approvalThreshold out of committeeSize must approve.
+func keyCommitteeMember(addr: String) = "committee_" + addr
+func keyCommitteeSize() = "committee_size"
+func keyApprovalThreshold() = "approval_threshold"
+# Proposal tracking
+func keyProposalRoot(proposalId: Int) = "proposal_" + proposalId.toString() + "_root"
+func keyProposalSlot(proposalId: Int) = "proposal_" + proposalId.toString() + "_slot"
+func keyProposalApprovalCount(proposalId: Int) = "proposal_" + proposalId.toString() + "_approvals"
+func keyProposalApproved(proposalId: Int, addr: String) = "proposal_" + proposalId.toString() + "_approved_" + addr
+func keyProposalFinalized(proposalId: Int) = "proposal_" + proposalId.toString() + "_finalized"
+func keyNextProposalId() = "next_proposal_id"
+
 # Replay protection
 func keyProcessedMessage(messageId: String) = "processed_" + messageId
 func keyBurnRecord(burnId: String) = "burn_" + burnId
@@ -135,6 +150,27 @@ func isCheckpointActive(id: Int) = {
 
 func getCheckpointRoot(id: Int) = {
     getBinaryValue(this, keyCheckpointRoot(id))
+}
+
+func isCommitteeMember(addr: String) = {
+    match getBoolean(this, keyCommitteeMember(addr)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func getCommitteeSize() = {
+    match getInteger(this, keyCommitteeSize()) {
+        case n: Int => n
+        case _ => 0
+    }
+}
+
+func getApprovalThreshold() = {
+    match getInteger(this, keyApprovalThreshold()) {
+        case n: Int => n
+        case _ => 0
+    }
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -349,13 +385,161 @@ func setVerifyingKey(vk: ByteVector, expectedHash: ByteVector) = {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# REGISTER CHECKPOINT (mirrors Solana checkpoint to DCC)
+# CHECKPOINT COMMITTEE MANAGEMENT (ATK-5 Fix)
 # ═══════════════════════════════════════════════════════════════
 #
-# Phase 1: Admin can register checkpoints (bridging the checkpoint
-# from Solana to DCC via the checkpoint committee).
-# Phase 2: This would be done by proving the Solana checkpoint on-chain.
+# Admin initializes a committee of N independent validators.
+# Checkpoints require T-of-N approvals before activation.
+# This prevents a single compromised key from injecting
+# a malicious checkpoint root.
 
+@Callable(i)
+func initializeCommittee(members: List[String], threshold: Int) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (size(members) < 3) then throw("Committee must have at least 3 members")
+    else if (threshold < 2) then throw("Threshold must be at least 2")
+    else if (threshold > size(members)) then throw("Threshold cannot exceed committee size")
+    else if (getCommitteeSize() > 0) then throw("Committee already initialized — use replaceCommittee")
+    else {
+        # Register each committee member
+        func addMember(acc: List[BooleanEntry], addr: String) = {
+            acc :+ BooleanEntry(keyCommitteeMember(addr), true)
+        }
+        let memberEntries = FOLD<10>(members, [], addMember)
+        memberEntries ++ [
+            IntegerEntry(keyCommitteeSize(), size(members)),
+            IntegerEntry(keyApprovalThreshold(), threshold),
+            IntegerEntry(keyNextProposalId(), 0)
+        ]
+    }
+}
+
+# Replace committee (admin only, for key rotation)
+@Callable(i)
+func replaceCommittee(newMembers: List[String], oldMembers: List[String], newThreshold: Int) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (size(newMembers) < 3) then throw("Committee must have at least 3 members")
+    else if (newThreshold < 2) then throw("Threshold must be at least 2")
+    else if (newThreshold > size(newMembers)) then throw("Threshold cannot exceed committee size")
+    else {
+        # Remove old members
+        func removeMember(acc: List[DeleteEntry], addr: String) = {
+            acc :+ DeleteEntry(keyCommitteeMember(addr))
+        }
+        let removeEntries = FOLD<10>(oldMembers, [], removeMember)
+        # Add new members
+        func addMember(acc: List[BooleanEntry], addr: String) = {
+            acc :+ BooleanEntry(keyCommitteeMember(addr), true)
+        }
+        let addEntries = FOLD<10>(newMembers, [], addMember)
+        removeEntries ++ addEntries ++ [
+            IntegerEntry(keyCommitteeSize(), size(newMembers)),
+            IntegerEntry(keyApprovalThreshold(), newThreshold)
+        ]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# REGISTER CHECKPOINT — Committee-based (ATK-5 Fix)
+# ═══════════════════════════════════════════════════════════════
+#
+# Phase 1 (Legacy/Fallback): Admin can register if no committee exists
+# Phase 2 (Decentralized): Committee members propose + approve checkpoints
+#
+# Protocol:
+#   1. Any committee member calls proposeCheckpoint(slot, root)
+#   2. Other members call approveCheckpoint(proposalId)
+#   3. Once threshold is met, checkpoint is auto-activated
+#
+# This ensures no single point of failure: at least T independent
+# validators must agree on the Solana checkpoint root.
+
+@Callable(i)
+func proposeCheckpoint(
+    slot: Int,
+    commitmentRoot: ByteVector
+) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else if (size(commitmentRoot) != 32) then throw("Invalid root length")
+    else if (commitmentRoot == base58'11111111111111111111111111111111') then throw("Zero root rejected")
+    else {
+        let committeeSize = getCommitteeSize()
+        let callerAddr = i.caller.toString()
+        if (committeeSize == 0) then throw("Committee not initialized — use registerCheckpoint (admin)")
+        else if (!isCommitteeMember(callerAddr)) then throw("Not a committee member")
+        else {
+            let nextProposal = match getInteger(this, keyNextProposalId()) {
+                case n: Int => n
+                case _ => 0
+            }
+            [
+                BinaryEntry(keyProposalRoot(nextProposal), commitmentRoot),
+                IntegerEntry(keyProposalSlot(nextProposal), slot),
+                IntegerEntry(keyProposalApprovalCount(nextProposal), 1),
+                BooleanEntry(keyProposalApproved(nextProposal, callerAddr), true),
+                BooleanEntry(keyProposalFinalized(nextProposal), false),
+                IntegerEntry(keyNextProposalId(), nextProposal + 1)
+            ]
+        }
+    }
+}
+
+@Callable(i)
+func approveCheckpoint(proposalId: Int) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else {
+        let callerAddr = i.caller.toString()
+        if (!isCommitteeMember(callerAddr)) then throw("Not a committee member")
+        else {
+            let isFinalized = match getBoolean(this, keyProposalFinalized(proposalId)) {
+                case b: Boolean => b
+                case _ => throw("Proposal does not exist: " + proposalId.toString())
+            }
+            if (isFinalized) then throw("Proposal already finalized")
+            else {
+                let alreadyApproved = match getBoolean(this, keyProposalApproved(proposalId, callerAddr)) {
+                    case b: Boolean => b
+                    case _ => false
+                }
+                if (alreadyApproved) then throw("Already approved by " + callerAddr)
+                else {
+                    let currentApprovals = getIntegerValue(this, keyProposalApprovalCount(proposalId))
+                    let newApprovals = currentApprovals + 1
+                    let threshold = getApprovalThreshold()
+                    
+                    if (newApprovals >= threshold) then {
+                        # Threshold met — activate the checkpoint
+                        let commitmentRoot = getBinaryValue(this, keyProposalRoot(proposalId))
+                        let slot = getIntegerValue(this, keyProposalSlot(proposalId))
+                        let nextId = match getInteger(this, keyNextCheckpointId()) {
+                            case n: Int => n
+                            case _ => 0
+                        }
+                        [
+                            IntegerEntry(keyProposalApprovalCount(proposalId), newApprovals),
+                            BooleanEntry(keyProposalApproved(proposalId, callerAddr), true),
+                            BooleanEntry(keyProposalFinalized(proposalId), true),
+                            # Activate the checkpoint
+                            BinaryEntry(keyCheckpointRoot(nextId), commitmentRoot),
+                            IntegerEntry(keyCheckpointSlot(nextId), slot),
+                            BooleanEntry(keyCheckpointActive(nextId), true),
+                            IntegerEntry(keyCheckpointHeight(nextId), height),
+                            IntegerEntry(keyNextCheckpointId(), nextId + 1)
+                        ]
+                    }
+                    else {
+                        [
+                            IntegerEntry(keyProposalApprovalCount(proposalId), newApprovals),
+                            BooleanEntry(keyProposalApproved(proposalId, callerAddr), true)
+                        ]
+                    }
+                }
+            }
+        }
+    }
+}
+
+# Legacy admin-only registerCheckpoint (only works when committee is NOT initialized)
 @Callable(i)
 func registerCheckpoint(
     checkpointId: Int,
@@ -364,6 +548,7 @@ func registerCheckpoint(
 ) = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
     else if (isPaused()) then throw("Bridge is paused")
+    else if (getCommitteeSize() > 0) then throw("Committee is active — use proposeCheckpoint + approveCheckpoint")
     else if (size(commitmentRoot) != 32) then throw("Invalid root length")
     else if (commitmentRoot == base58'11111111111111111111111111111111') then throw("Zero root rejected")
     else {
