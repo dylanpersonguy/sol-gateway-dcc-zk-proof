@@ -234,7 +234,10 @@ async function main(): Promise<void> {
       });
       return;
     }
-    if (!rateLimiter.tryConsume(amountBigint)) {
+    // SECURITY FIX (VAL-5): Use canConsume (check-only) before consensus.
+    // Actual consumption happens in consensus_reached handler to prevent DoS
+    // via budget drain on failed/timeout consensus rounds.
+    if (!rateLimiter.canConsume(amountBigint)) {
       logger.error('RATE LIMIT: Daily outflow limit would be exceeded — rejecting deposit', {
         transferId: event.transferId,
         amount: amountBigint.toString(),
@@ -309,7 +312,8 @@ async function main(): Promise<void> {
       });
       return;
     }
-    if (!rateLimiter.tryConsume(amountBigint)) {
+    // SECURITY FIX (VAL-5): Use canConsume (check-only) before consensus.
+    if (!rateLimiter.canConsume(amountBigint)) {
       logger.error('RATE LIMIT: Daily outflow limit would be exceeded — rejecting unlock', {
         burnId: event.burnId,
         amount: amountBigint.toString(),
@@ -349,6 +353,20 @@ async function main(): Promise<void> {
     });
 
     try {
+      // SECURITY FIX (VAL-5): Actually consume rate limit budget AFTER consensus success.
+      // The event amount for mints/unlocks was fee-adjusted, so we consume the net amount.
+      const eventAmount = result.event
+        ? BigInt((result.event as any).amount)
+        : 0n;
+      if (eventAmount > 0n) {
+        if (!rateLimiter.consume(eventAmount)) {
+          logger.error('RATE LIMIT: Daily limit exceeded at submission time — aborting', {
+            transferId: result.transferId,
+          });
+          return;
+        }
+      }
+
       if (result.type === 'mint') {
         await submitMintToDcc(config, result);
         // Notify API that committee mint is complete

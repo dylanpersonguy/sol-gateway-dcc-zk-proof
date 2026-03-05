@@ -459,6 +459,7 @@ func mintToken(
                 }
                 
                 if (amount >= largeTxThreshold) then {
+                    # SECURITY FIX (HIGH-5): Update totalMinted for pending mints
                     [
                         BooleanEntry(keyPendingLargeTx(transferId), true),
                         IntegerEntry(keyPendingLargeTxHeight(transferId), height),
@@ -466,6 +467,8 @@ func mintToken(
                         IntegerEntry("pending_amount_" + transferId, mintAmount),
                         StringEntry("pending_spl_mint_" + transferId, splMint),
                         BooleanEntry(keyProcessedTransfer(transferId), true),
+                        IntegerEntry(keyTokenTotalMinted(splMint), tokenMinted + mintAmount),
+                        IntegerEntry(keyGlobalNonce(), nonce + 1),
                         IntegerEntry(keyDailyMinted(), newDailyMinted),
                         IntegerEntry(keyDailyResetHeight(), newResetHeight)
                     ]
@@ -580,9 +583,8 @@ func executePendingMint(transferId: String) = {
                     DeleteEntry("pending_amount_" + transferId),
                     DeleteEntry("pending_spl_mint_" + transferId),
                     Reissue(fromBase58String(dccAssetId).value(), amount, true),
-                    ScriptTransfer(recipientAddr, amount, fromBase58String(dccAssetId).value()),
-                    IntegerEntry(keyTokenTotalMinted(splMint), tokenMinted + amount),
-                    IntegerEntry(keyGlobalNonce(), nonce + 1)
+                    ScriptTransfer(recipientAddr, amount, fromBase58String(dccAssetId).value())
+                    # NOTE: tokenTotalMinted already incremented at queue time (HIGH-5 fix)
                 ]
             }
         }
@@ -620,6 +622,13 @@ func burnToken(solRecipient: String, splMint: String) = {
                 payment.amount.toBytes()
             ))
             
+            # SECURITY FIX (VULN-13): Check burn_record doesn't already exist (replay protection)
+            if (isDefined(getString(this, keyBurnRecord(burnId)))) then throw("Burn already processed: " + burnId)
+            else
+            # SECURITY FIX (HIGH-6): Update global totalBurned for multi-token burns.
+            # Previously only per-token burned was updated, causing supply tracking drift.
+            let totalBurned = getIntegerValue(this, keyTotalBurned())
+            
             [
                 Burn(payment.assetId.value(), payment.amount),
                 StringEntry(keyBurnRecord(burnId), 
@@ -630,6 +639,7 @@ func burnToken(solRecipient: String, splMint: String) = {
                     height.toString() + "|" +
                     lastBlock.timestamp.toString()
                 ),
+                IntegerEntry(keyTotalBurned(), totalBurned + payment.amount),
                 IntegerEntry(keyTokenTotalBurned(splMint), tokenBurned + payment.amount),
                 IntegerEntry(keyBurnNonce(i.caller.toString()), userNonce + 1)
             ]
@@ -665,6 +675,9 @@ func burn(solRecipient: String) = {
                 payment.amount.toBytes()
             ))
             
+            # SECURITY FIX (VULN-13): Check burn_record doesn't already exist (replay protection)
+            if (isDefined(getString(this, keyBurnRecord(burnId)))) then throw("Burn already processed: " + burnId)
+            else
             [
                 Burn(payment.assetId.value(), payment.amount),
                 StringEntry(keyBurnRecord(burnId), 
@@ -699,7 +712,43 @@ func emergencyPause() = {
 func emergencyResume() = {
     if (!isAdmin(i.caller)) then throw("Only admin can resume")
     else {
-        [BooleanEntry(keyPaused(), false)]
+        # SECURITY FIX (VULN-9): Timelocked unpause.
+        # Admin must call requestResume first, wait 100 blocks, then call executeResume.
+        throw("Use requestResume + executeResume for timelocked unpause")
+    }
+}
+
+# SECURITY FIX (VULN-9): Two-phase timelocked unpause
+func keyResumeRequestedAt() = "resume_requested_at"
+let resumeDelayBlocks = 100
+
+@Callable(i)
+func requestResume() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can request resume")
+    else if (!isPaused()) then throw("Bridge is not paused")
+    else {
+        [IntegerEntry(keyResumeRequestedAt(), height)]
+    }
+}
+
+@Callable(i)
+func executeResume() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can execute resume")
+    else if (!isPaused()) then throw("Bridge is not paused")
+    else {
+        let requestedAt = match getInteger(this, keyResumeRequestedAt()) {
+            case h: Int => h
+            case _ => throw("No resume request pending — call requestResume first")
+        }
+        if (requestedAt == 0) then throw("No resume request pending")
+        else if (height - requestedAt < resumeDelayBlocks) then
+            throw("Resume delay not elapsed. Wait " + (resumeDelayBlocks - (height - requestedAt)).toString() + " more blocks")
+        else {
+            [
+                BooleanEntry(keyPaused(), false),
+                DeleteEntry(keyResumeRequestedAt())
+            ]
+        }
     }
 }
 
@@ -739,11 +788,40 @@ func updateMaxSingleMint(newMax: Int) = {
     }
 }
 
+# SECURITY FIX (VULN-10): Two-phase admin transfer with timelock
+func keyPendingAdmin() = "pending_admin"
+func keyAdminTransferHeight() = "admin_transfer_height"
+let adminTransferDelay = 100  # ~100 blocks delay
+
 @Callable(i)
 func transferAdmin(newAdmin: String) = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
     else {
-        [StringEntry(keyAdmin(), newAdmin)]
+        [
+            StringEntry(keyPendingAdmin(), newAdmin),
+            IntegerEntry(keyAdminTransferHeight(), height)
+        ]
+    }
+}
+
+@Callable(i)
+func acceptAdmin() = {
+    let pendingAdmin = match getString(this, keyPendingAdmin()) {
+        case s: String => s
+        case _ => throw("No pending admin transfer")
+    }
+    if (i.caller.toString() != pendingAdmin) then throw("Only pending admin can accept")
+    else {
+        let proposedHeight = getIntegerValue(this, keyAdminTransferHeight())
+        if (height - proposedHeight < adminTransferDelay) then
+            throw("Admin transfer delay not elapsed")
+        else {
+            [
+                StringEntry(keyAdmin(), pendingAdmin),
+                DeleteEntry(keyPendingAdmin()),
+                DeleteEntry(keyAdminTransferHeight())
+            ]
+        }
     }
 }
 

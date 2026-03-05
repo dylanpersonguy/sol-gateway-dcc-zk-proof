@@ -79,8 +79,14 @@ pub struct BridgeConfig {
     /// Required delay in seconds between request_resume and resume
     pub resume_delay_seconds: i64,
 
+    /// SECURITY FIX (HIGH-3): Pending authority for 2-step transfer
+    pub pending_authority: Pubkey,
+
+    /// Timestamp when authority transfer was proposed (0 = no pending)
+    pub authority_transfer_requested_at: i64,
+
     /// Reserved space for future fields
-    pub _reserved: [u8; 112],
+    pub _reserved: [u8; 72],
 }
 
 impl Default for BridgeConfig {
@@ -110,7 +116,9 @@ impl Default for BridgeConfig {
             vault_bump: 0,
             resume_requested_at: 0,
             resume_delay_seconds: 0,
-            _reserved: [0u8; 112],
+            pending_authority: Pubkey::default(),
+            authority_transfer_requested_at: 0,
+            _reserved: [0u8; 72],
         }
     }
 }
@@ -141,7 +149,9 @@ impl BridgeConfig {
         + 1     // vault_bump
         + 8     // resume_requested_at
         + 8     // resume_delay_seconds
-        + 112;  // reserved
+        + 32    // pending_authority
+        + 8     // authority_transfer_requested_at
+        + 72;   // reserved
 }
 
 /// ═══════════════════════════════════════════════════════════════
@@ -173,7 +183,8 @@ pub struct DepositRecord {
     pub slot: u64,
 
     /// Event index within the checkpoint window
-    pub event_index: u32,
+    /// SECURITY FIX (LOW-1): Widened from u32 to u64 to avoid truncation after ~4B events.
+    pub event_index: u64,
 
     /// Unix timestamp of deposit
     pub timestamp: i64,
@@ -197,7 +208,7 @@ impl DepositRecord {
         + 8     // amount
         + 8     // nonce
         + 8     // slot
-        + 4     // event_index
+        + 8     // event_index (LOW-1: widened to u64)
         + 8     // timestamp
         + 32    // asset_id
         + 1     // processed

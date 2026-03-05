@@ -71,11 +71,17 @@ pub struct CheckpointConfig {
     /// Bump seed
     pub bump: u8,
 
+    /// SECURITY FIX (MED-2): Timestamp when resume was requested (0 = no pending resume)
+    pub resume_requested_at: i64,
+
     /// Reserved for future fields
-    pub _reserved: [u8; 64],
+    pub _reserved: [u8; 56],
 }
 
 impl CheckpointConfig {
+    /// Timelock for resume after pause (5 minutes = 300 seconds)
+    pub const RESUME_TIMELOCK_SECONDS: i64 = 300;
+
     pub const LEN: usize = 8  // discriminator
         + 32    // authority
         + 32    // guardian
@@ -94,7 +100,8 @@ impl CheckpointConfig {
         + 4     // solana_chain_id
         + 4     // dcc_chain_id
         + 1     // bump
-        + 64;   // reserved
+        + 8     // resume_requested_at (MED-2)
+        + 56;   // reserved (was 64, carved 8 for resume_requested_at)
 }
 
 /// Individual checkpoint entry (PDA: seeds = [b"checkpoint", checkpoint_id.to_le_bytes()])

@@ -13,8 +13,11 @@ pub struct RegisterMember<'info> {
     )]
     pub config: Account<'info, CheckpointConfig>,
 
+    /// SECURITY FIX (MED-3): Use init_if_needed to allow re-registering
+    /// previously removed members. With `init`, removed members permanently
+    /// bricked their PDA slot since the account already exists.
     #[account(
-        init,
+        init_if_needed,
         payer = authority,
         space = CommitteeMember::LEN,
         seeds = [b"member", member_pubkey.as_ref()],
@@ -36,8 +39,15 @@ pub fn handler(ctx: Context<RegisterMember>, member_pubkey: Pubkey) -> Result<()
         CheckpointError::MaxMembersReached
     );
 
-    let clock = Clock::get()?;
     let member = &mut ctx.accounts.member;
+
+    // SECURITY FIX (MED-3): If the member PDA already exists and is active, reject.
+    // If it exists but is inactive (previously removed), re-activate it.
+    if member.active {
+        return Err(CheckpointError::MemberAlreadyRegistered.into());
+    }
+
+    let clock = Clock::get()?;
     member.pubkey = member_pubkey;
     member.active = true;
     member.registered_at = clock.unix_timestamp;

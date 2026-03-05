@@ -148,6 +148,10 @@ func intToLE4(v: Int) = {
 }
 
 func intToLE8(v: Int) = {
+    # SECURITY FIX (VULN-12): Guard against negative values — modular arithmetic
+    # on negative ints produces incorrect little-endian bytes.
+    if (v < 0) then throw("intToLE8: negative value")
+    else
     let b0 = v % 256
     let b1 = (v / 256) % 256
     let b2 = (v / 65536) % 256
@@ -348,11 +352,16 @@ func committeeMint(
                     let pauseEntries = if (shouldAutoPause) then [BooleanEntry(keyPaused(), true)] else []
 
                     if (amount >= largeTxThreshold) then {
+                        # SECURITY FIX (HIGH-5): Update totalMinted even for pending
+                        # large mints. Previously, pending mints did not update the
+                        # counter, causing supply tracking to drift.
                         baseEntries ++ pauseEntries ++ [
                             BooleanEntry(keyPendingLargeTx(transferId), true),
                             IntegerEntry(keyPendingLargeTxHeight(transferId), height),
                             StringEntry(keyPendingRecipient(transferId), recipient),
-                            IntegerEntry(keyPendingAmount(transferId), mintAmount)
+                            IntegerEntry(keyPendingAmount(transferId), mintAmount),
+                            IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                            IntegerEntry(keyGlobalNonce(), globalNonce + 1)
                         ]
                     }
                     else {
@@ -399,9 +408,9 @@ func executePendingMint(messageIdStr: String) = {
                     DeleteEntry(keyPendingRecipient(messageIdStr)),
                     DeleteEntry(keyPendingAmount(messageIdStr)),
                     Reissue(fromBase58String(wsolAssetId).value(), amount, true),
-                    ScriptTransfer(recipientAddr, amount, fromBase58String(wsolAssetId).value()),
-                    IntegerEntry(keyTotalMinted(), totalMinted + amount),
-                    IntegerEntry(keyGlobalNonce(), nonce + 1)
+                    ScriptTransfer(recipientAddr, amount, fromBase58String(wsolAssetId).value())
+                    # NOTE: totalMinted was already incremented when the pending
+                    # mint was queued (HIGH-5 fix), so we do NOT re-increment here.
                 ]
             }
         }
@@ -543,11 +552,40 @@ func checkInvariant() = {
 # ADMIN
 # ═══════════════════════════════════════════════════════════════
 
+# SECURITY FIX (VULN-10): Two-phase admin transfer with timelock
+func keyPendingAdmin() = "pending_admin"
+func keyAdminTransferHeight() = "admin_transfer_height"
+let adminTransferDelay = 100  # ~100 blocks delay
+
 @Callable(i)
 func transferAdmin(newAdmin: String) = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
     else {
-        [StringEntry(keyAdmin(), newAdmin)]
+        [
+            StringEntry(keyPendingAdmin(), newAdmin),
+            IntegerEntry(keyAdminTransferHeight(), height)
+        ]
+    }
+}
+
+@Callable(i)
+func acceptAdmin() = {
+    let pendingAdmin = match getString(this, keyPendingAdmin()) {
+        case s: String => s
+        case _ => throw("No pending admin transfer")
+    }
+    if (i.caller.toString() != pendingAdmin) then throw("Only pending admin can accept")
+    else {
+        let proposedHeight = getIntegerValue(this, keyAdminTransferHeight())
+        if (height - proposedHeight < adminTransferDelay) then
+            throw("Admin transfer delay not elapsed")
+        else {
+            [
+                StringEntry(keyAdmin(), pendingAdmin),
+                DeleteEntry(keyPendingAdmin()),
+                DeleteEntry(keyAdminTransferHeight())
+            ]
+        }
     }
 }
 
@@ -623,11 +661,14 @@ func zkMintAuthorized(recipient: String, amount: Int, messageId: String, solSlot
                 let pauseEntries = if (shouldAutoPause) then [BooleanEntry(keyPaused(), true)] else []
 
                 if (amount >= largeTxThreshold) then {
+                    # SECURITY FIX (HIGH-5): Update totalMinted even for pending mints
                     baseEntries ++ pauseEntries ++ [
                         BooleanEntry(keyPendingLargeTx(messageId), true),
                         IntegerEntry(keyPendingLargeTxHeight(messageId), height),
                         StringEntry(keyPendingRecipient(messageId), recipient),
-                        IntegerEntry(keyPendingAmount(messageId), mintAmount)
+                        IntegerEntry(keyPendingAmount(messageId), mintAmount),
+                        IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                        IntegerEntry(keyGlobalNonce(), globalNonce + 1)
                     ]
                 }
                 else {

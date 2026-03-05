@@ -110,4 +110,12 @@ pub enum BridgeError {
     /// A resume request is already pending
     #[msg("Resume request already pending")]
     ResumeAlreadyRequested,
+
+    /// No authority transfer is pending
+    #[msg("No authority transfer pending")]
+    NoAuthorityTransferPending,
+
+    /// Authority transfer timelock has not elapsed (24h minimum)
+    #[msg("Authority transfer timelock not elapsed — wait 24 hours")]
+    AuthorityTransferTimelockNotElapsed,
 }

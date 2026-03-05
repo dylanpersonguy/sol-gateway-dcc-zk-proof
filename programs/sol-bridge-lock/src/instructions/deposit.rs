@@ -165,7 +165,7 @@ pub fn handler(ctx: Context<Deposit>, params: DepositParams) -> Result<()> {
         .ok_or(BridgeError::ArithmeticOverflow)?;
 
     // ── Populate deposit record ──
-    let event_index = config.global_nonce as u32; // event index within checkpoint window
+    let event_index = config.global_nonce; // SECURITY FIX (LOW-1): use u64 directly, no truncation
     let native_sol_asset = NATIVE_SOL_ASSET.parse::<Pubkey>().unwrap();
 
     // ── Compute ZK bridge message_id ──
@@ -245,20 +245,20 @@ pub fn compute_message_id(
     dst_chain_id: u32,
     src_program_id: &Pubkey,
     slot: u64,
-    event_index: u32,
+    event_index: u64, // SECURITY FIX (LOW-1): widened from u32
     sender: &Pubkey,
     recipient: &[u8; 32],
     amount: u64,
     nonce: u64,
     asset_id: &Pubkey,
 ) -> [u8; 32] {
-    let mut data = Vec::with_capacity(181);
+    let mut data = Vec::with_capacity(185); // 181 + 4 extra for u64 event_index
     data.extend_from_slice(DOMAIN_SEP);                      // 17 bytes
     data.extend_from_slice(&src_chain_id.to_le_bytes());     // 4 bytes
     data.extend_from_slice(&dst_chain_id.to_le_bytes());     // 4 bytes
     data.extend_from_slice(src_program_id.as_ref());         // 32 bytes
     data.extend_from_slice(&slot.to_le_bytes());             // 8 bytes
-    data.extend_from_slice(&event_index.to_le_bytes());      // 4 bytes
+    data.extend_from_slice(&event_index.to_le_bytes());      // 8 bytes (LOW-1: was 4)
     data.extend_from_slice(sender.as_ref());                 // 32 bytes
     data.extend_from_slice(recipient);                       // 32 bytes
     data.extend_from_slice(&amount.to_le_bytes());           // 8 bytes

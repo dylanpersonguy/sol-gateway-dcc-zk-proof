@@ -214,11 +214,17 @@ pub fn handler(ctx: Context<Unlock>, params: UnlockParams) -> Result<()> {
     // ── CIRCUIT BREAKER: Check daily outflow ──
     let config = &mut ctx.accounts.bridge_config;
     
-    // Reset daily counter if new day
+    // SECURITY FIX (LOW-3): Use aligned window reset to prevent boundary gaming.
+    // Previous simple reset allowed 2x daily limit near window boundaries.
+    // Now we reset to 0 only when a full day has elapsed, and set last_daily_reset
+    // to the start of the current aligned window (not current time).
     let day_seconds: i64 = 86400;
-    if clock.unix_timestamp - config.last_daily_reset >= day_seconds {
+    let elapsed = clock.unix_timestamp - config.last_daily_reset;
+    if elapsed >= day_seconds {
         config.current_daily_outflow = 0;
-        config.last_daily_reset = clock.unix_timestamp;
+        // Align to day boundary to prevent drift
+        let windows_elapsed = elapsed / day_seconds;
+        config.last_daily_reset = config.last_daily_reset + (windows_elapsed * day_seconds);
     }
 
     let new_daily_outflow = config.current_daily_outflow
@@ -231,6 +237,11 @@ pub fn handler(ctx: Context<Unlock>, params: UnlockParams) -> Result<()> {
 
     // ── GUARD: Large withdrawal delay ──
     if params.amount >= config.large_withdrawal_threshold {
+        // SECURITY FIX (HIGH-1): Commit daily outflow BEFORE early return.
+        // Previously, scheduled unlocks did not increment the circuit breaker,
+        // allowing unlimited large withdrawals to bypass the daily limit.
+        config.current_daily_outflow = new_daily_outflow;
+
         // For large withdrawals, we create the record but don't execute immediately
         // A separate instruction must be called after the delay
         let unlock_record = &mut ctx.accounts.unlock_record;
@@ -278,6 +289,9 @@ pub fn handler(ctx: Context<Unlock>, params: UnlockParams) -> Result<()> {
         .checked_add(params.amount)
         .ok_or(BridgeError::ArithmeticOverflow)?;
     config.current_daily_outflow = new_daily_outflow;
+
+    // SECURITY FIX (LOW-2): Decrement total_locked on unlock
+    config.total_locked = config.total_locked.saturating_sub(params.amount);
 
     let unlock_record = &mut ctx.accounts.unlock_record;
     unlock_record.transfer_id = params.transfer_id;
@@ -514,6 +528,28 @@ pub fn execute_scheduled_unlock_handler(
 
     let amount = unlock_record.amount;
 
+    // ── SECURITY FIX (HIGH-2): Circuit breaker check for scheduled unlocks ──
+    // Previously, execute_scheduled_unlock had NO daily outflow check, allowing
+    // multiple large unlocks scheduled on different days to all execute on the
+    // same day, far exceeding the intended daily limit.
+    let config = &mut ctx.accounts.bridge_config;
+    let day_seconds: i64 = 86400;
+    // SECURITY FIX (LOW-3): Aligned window reset (same as immediate unlock path)
+    let elapsed = clock.unix_timestamp - config.last_daily_reset;
+    if elapsed >= day_seconds {
+        config.current_daily_outflow = 0;
+        let windows_elapsed = elapsed / day_seconds;
+        config.last_daily_reset = config.last_daily_reset + (windows_elapsed * day_seconds);
+    }
+
+    let new_daily_outflow = config.current_daily_outflow
+        .checked_add(amount)
+        .ok_or(BridgeError::ArithmeticOverflow)?;
+    require!(
+        new_daily_outflow <= config.max_daily_outflow,
+        BridgeError::DailyOutflowExceeded
+    );
+
     // ── GUARD: Vault has sufficient funds ──
     let vault_lamports = ctx.accounts.vault.lamports();
     require!(
@@ -522,7 +558,6 @@ pub fn execute_scheduled_unlock_handler(
     );
 
     // ── Execute the transfer ──
-    let config = &mut ctx.accounts.bridge_config;
     let vault_seeds: &[&[u8]] = &[b"vault", &[config.vault_bump]];
     let signer_seeds = &[vault_seeds];
 
@@ -542,6 +577,11 @@ pub fn execute_scheduled_unlock_handler(
     config.total_unlocked = config.total_unlocked
         .checked_add(amount)
         .ok_or(BridgeError::ArithmeticOverflow)?;
+    config.current_daily_outflow = new_daily_outflow;
+
+    // SECURITY FIX (LOW-2): Decrement total_locked on unlock to maintain
+    // the supply invariant (total_locked tracks actual vault obligations).
+    config.total_locked = config.total_locked.saturating_sub(amount);
 
     let unlock_record = &mut ctx.accounts.unlock_record;
     unlock_record.executed = true;

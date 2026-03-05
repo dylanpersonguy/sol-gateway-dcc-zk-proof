@@ -159,8 +159,10 @@ func fieldElementToInt(fe: ByteVector) = {
 }
 
 # Extract a 32-bit integer from a 32-byte BE field element
+# SECURITY FIX (VULN-14): Was identical to fieldElementToInt (offset 24 → 8 byte read).
+# For a 32-bit value in a 32-byte BE field element, we need offset 28 (bytes 28-31).
 func fieldElementToInt32(fe: ByteVector) = {
-    toInt(fe, 24)
+    toInt(fe, 28) % 4294967296
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -176,6 +178,10 @@ func intToLE4(v: Int) = {
 }
 
 func intToLE8(v: Int) = {
+    # SECURITY FIX (VULN-12): Guard against negative values — modular arithmetic
+    # on negative ints produces incorrect little-endian bytes.
+    if (v < 0) then throw("intToLE8: negative value")
+    else
     let b0 = v % 256
     let b1 = (v / 256) % 256
     let b2 = (v / 65536) % 256
@@ -246,25 +252,18 @@ func initialize(bridgeCoreAddress: String) = {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# SET VERIFYING KEY (admin-only, can be reset then re-set)
+# SET VERIFYING KEY (admin-only, IMMUTABLE once set)
 # ═══════════════════════════════════════════════════════════════
-
-@Callable(i)
-func resetVerifyingKey() = {
-    if (!isAdmin(i.caller)) then throw("Unauthorized")
-    else {
-        [
-            BooleanEntry(keyVkSet(), false),
-            DeleteEntry(keyVerifyingKey()),
-            DeleteEntry("groth16_vk_hash")
-        ]
-    }
-}
+#
+# SECURITY FIX (HIGH-7): Removed resetVerifyingKey entirely.
+# The VK is immutable after first set. A compromised admin can no longer
+# install a backdoored VK that accepts proofs for arbitrary recipients.
+# To change the VK, a new contract must be deployed.
 
 @Callable(i)
 func setVerifyingKey(vk: ByteVector, expectedHash: ByteVector) = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
-    else if (isVkSet()) then throw("Verifying key already set — call resetVerifyingKey first")
+    else if (isVkSet()) then throw("Verifying key is IMMUTABLE — already set. Deploy new contract to change.")
     else if (size(vk) == 0) then throw("Empty verifying key")
     else if (size(expectedHash) != 32) then throw("Expected hash must be 32 bytes")
     else {
@@ -528,6 +527,9 @@ func verifyAndMint(
 # EMERGENCY CONTROLS
 # ═══════════════════════════════════════════════════════════════
 
+func keyUnpauseRequestedAt() = "unpause_requested_at"
+let unpauseDelayBlocks = 100  # ~100 blocks delay
+
 @Callable(i)
 func emergencyPause() = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
@@ -536,11 +538,35 @@ func emergencyPause() = {
     }
 }
 
+# SECURITY FIX (VULN-9): Two-phase timelocked unpause.
+# Prevents instant resume after a compromise triggers the pause.
 @Callable(i)
-func unpause() = {
-    if (!isAdmin(i.caller)) then throw("Unauthorized")
+func requestUnpause() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can request unpause")
+    else if (!isPaused()) then throw("Bridge is not paused")
     else {
-        [BooleanEntry(keyPaused(), false)]
+        [IntegerEntry(keyUnpauseRequestedAt(), height)]
+    }
+}
+
+@Callable(i)
+func executeUnpause() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can execute unpause")
+    else if (!isPaused()) then throw("Bridge is not paused")
+    else {
+        let requestedAt = match getInteger(this, keyUnpauseRequestedAt()) {
+            case h: Int => h
+            case _ => throw("No unpause request pending — call requestUnpause first")
+        }
+        if (requestedAt == 0) then throw("No unpause request pending")
+        else if (height - requestedAt < unpauseDelayBlocks) then
+            throw("Unpause delay not elapsed. Wait " + (unpauseDelayBlocks - (height - requestedAt)).toString() + " more blocks")
+        else {
+            [
+                BooleanEntry(keyPaused(), false),
+                DeleteEntry(keyUnpauseRequestedAt())
+            ]
+        }
     }
 }
 
@@ -548,19 +574,46 @@ func unpause() = {
 # ADMIN
 # ═══════════════════════════════════════════════════════════════
 
+# SECURITY FIX (HIGH-8): Bridge core address is IMMUTABLE after initialization.
+# A compromised admin could previously redirect verifyAndMint invocations to
+# a different contract, completely bypassing the legitimate bridge.
+# The address is set once during initialize() and cannot be changed.
+# To update, a new contract must be deployed.
+
+# SECURITY FIX (VULN-10): Two-phase admin transfer with confirmation.
+func keyPendingAdmin() = "pending_admin"
+func keyAdminTransferHeight() = "admin_transfer_height"
+let adminTransferDelay = 100  # ~100 blocks delay
+
 @Callable(i)
-func updateBridgeCoreAddress(newAddress: String) = {
+func proposeAdmin(newAdmin: String) = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
     else {
-        [StringEntry(keyBridgeCoreAddress(), newAddress)]
+        [
+            StringEntry(keyPendingAdmin(), newAdmin),
+            IntegerEntry(keyAdminTransferHeight(), height)
+        ]
     }
 }
 
 @Callable(i)
-func transferAdmin(newAdmin: String) = {
-    if (!isAdmin(i.caller)) then throw("Unauthorized")
+func acceptAdmin() = {
+    let pendingAdmin = match getString(this, keyPendingAdmin()) {
+        case s: String => s
+        case _ => throw("No pending admin transfer")
+    }
+    if (i.caller.toString() != pendingAdmin) then throw("Only pending admin can accept")
     else {
-        [StringEntry(keyAdmin(), newAdmin)]
+        let proposedHeight = getIntegerValue(this, keyAdminTransferHeight())
+        if (height - proposedHeight < adminTransferDelay) then
+            throw("Admin transfer delay not elapsed")
+        else {
+            [
+                StringEntry(keyAdmin(), pendingAdmin),
+                DeleteEntry(keyPendingAdmin()),
+                DeleteEntry(keyAdminTransferHeight())
+            ]
+        }
     }
 }
 

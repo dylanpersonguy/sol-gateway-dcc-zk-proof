@@ -93,6 +93,18 @@ pub fn handler(ctx: Context<DepositSpl>, params: DepositSplParams) -> Result<()>
         BridgeError::InvalidDccAddress
     );
 
+    // ── GUARD: DCC address format validation (MED-1 fix) ──
+    // Mirror the same validation from deposit.rs — reject all-0xFF and
+    // addresses with a zero first byte (invalid version byte).
+    {
+        let all_ff = params.recipient_dcc.iter().all(|&b| b == 0xFF);
+        require!(!all_ff, BridgeError::InvalidDccAddress);
+        require!(
+            params.recipient_dcc[0] != 0,
+            BridgeError::InvalidDccAddress
+        );
+    }
+
     let clock = Clock::get()?;
     let user_state = &mut ctx.accounts.user_state;
 
@@ -132,7 +144,7 @@ pub fn handler(ctx: Context<DepositSpl>, params: DepositSplParams) -> Result<()>
 
     // ── Update bridge config ──
     let config = &mut ctx.accounts.bridge_config;
-    let event_index = config.global_nonce as u32;
+    let event_index = config.global_nonce; // SECURITY FIX (LOW-1): use u64 directly, no truncation
     // Note: total_locked tracks native SOL. For SPL tokens, tracking is
     // per-deposit in the deposit record and via events.
     config.global_nonce = config.global_nonce

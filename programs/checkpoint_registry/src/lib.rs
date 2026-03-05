@@ -82,7 +82,12 @@ pub mod checkpoint_registry {
         instructions::emergency::pause_handler(ctx)
     }
 
-    /// Resume after emergency pause.
+    /// SECURITY FIX (MED-2): Request resume — starts timelock.
+    pub fn request_resume(ctx: Context<RequestResumeCheckpoint>) -> Result<()> {
+        instructions::emergency::request_resume_handler(ctx)
+    }
+
+    /// SECURITY FIX (MED-2): Execute resume after timelock has elapsed.
     pub fn emergency_resume(ctx: Context<EmergencyResumeCheckpoint>) -> Result<()> {
         instructions::emergency::resume_handler(ctx)
     }

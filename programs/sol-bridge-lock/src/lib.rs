@@ -99,6 +99,12 @@ pub mod sol_bridge_lock {
         instructions::update_config::handler(ctx, params)
     }
 
+    /// Accept a pending authority transfer (step 2 of 2-step transfer).
+    /// Must be called by the pending authority after 24h timelock.
+    pub fn accept_authority(ctx: Context<AcceptAuthority>) -> Result<()> {
+        instructions::update_config::accept_authority_handler(ctx)
+    }
+
     /// Register a validator's public key for signature verification.
     pub fn register_validator(
         ctx: Context<RegisterValidator>,

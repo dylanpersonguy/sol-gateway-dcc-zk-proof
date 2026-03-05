@@ -73,6 +73,10 @@ export class ConsensusEngine extends EventEmitter {
   private signMessage: SignCallback;
   private getPublicKey: PublicKeyCallback;
   private processedTransfers: Set<string> = new Set();
+  /** SECURITY FIX (VAL-10): Maximum size for processedTransfers to prevent OOM.
+   *  When exceeded, oldest entries are evicted. Safe because PDA-based replay
+   *  protection on-chain is the ultimate guard — this Set is a local optimization. */
+  private static readonly MAX_PROCESSED_TRANSFERS = 100_000;
   /** Whitelist of registered validator public keys (hex-encoded) */
   private registeredValidators: Set<string> = new Set();
 
@@ -100,10 +104,12 @@ export class ConsensusEngine extends EventEmitter {
       if (fs.existsSync(filePath)) {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         if (Array.isArray(data)) {
-          for (const id of data) {
+          // SECURITY FIX (VAL-10): Only load the most recent entries up to the cap
+          const entries = data.slice(-ConsensusEngine.MAX_PROCESSED_TRANSFERS);
+          for (const id of entries) {
             this.processedTransfers.add(id);
           }
-          this.logger.info('Loaded processed transfers from disk', { count: data.length });
+          this.logger.info('Loaded processed transfers from disk', { count: entries.length });
         }
       }
     } catch (err: any) {
@@ -240,6 +246,20 @@ export class ConsensusEngine extends EventEmitter {
       return;
     }
 
+    // ── GUARD: SECURITY FIX (VAL-6) — Bind nodeId to signing key ──
+    // Prevent nodeId spoofing by verifying nodeId matches the public key's hex encoding.
+    // Without this, an attacker can claim any nodeId while signing with their own key,
+    // degrading consensus liveness tracking and allowing impersonation.
+    if (nodeId !== pubkeyHex) {
+      this.logger.error('REJECTING attestation: nodeId does not match publicKey', {
+        transferId,
+        claimedNodeId: nodeId,
+        actualPubkey: pubkeyHex,
+      });
+      this.emit('byzantine_detected', { nodeId, transferId, reason: 'nodeId_pubkey_mismatch' });
+      return;
+    }
+
     // ── GUARD: DCC Curve25519 signature verification (H-1 fix) ──
     try {
       const isValid = dccVerifySignature(
@@ -342,6 +362,12 @@ export class ConsensusEngine extends EventEmitter {
       };
 
       this.processedTransfers.add(transferId);
+      // SECURITY FIX (VAL-10): Evict oldest entries when set exceeds max size to prevent OOM.
+      if (this.processedTransfers.size > ConsensusEngine.MAX_PROCESSED_TRANSFERS) {
+        const iter = this.processedTransfers.values();
+        const oldest = iter.next().value;
+        if (oldest) this.processedTransfers.delete(oldest);
+      }
       this.persistProcessedTransfers(); // H-3: persist to disk immediately
       this.logger.info('CONSENSUS REACHED', {
         transferId,

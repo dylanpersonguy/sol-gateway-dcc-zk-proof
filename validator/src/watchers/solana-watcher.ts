@@ -284,6 +284,21 @@ export class SolanaWatcher extends EventEmitter {
 
     if (!logs.logs) return events;
 
+    // SECURITY FIX (VAL-8): Precompute BridgeDeposit Anchor event discriminator.
+    // Anchor event discriminator = sha256("event:BridgeDeposit")[0..8]
+    // Without this check, non-bridge log entries could be mis-parsed as deposits.
+    const crypto = require('crypto');
+    const BRIDGE_DEPOSIT_DISC = crypto
+      .createHash('sha256')
+      .update('event:BridgeDeposit')
+      .digest()
+      .subarray(0, 8);
+    const BRIDGE_DEPOSIT_SPL_DISC = crypto
+      .createHash('sha256')
+      .update('event:BridgeDepositSpl')
+      .digest()
+      .subarray(0, 8);
+
     for (const log of logs.logs) {
       // Look for the BridgeDeposit event marker
       if (log.includes('Program data:')) {
@@ -296,8 +311,11 @@ export class SolanaWatcher extends EventEmitter {
           // Parse event discriminator (first 8 bytes)
           const discriminator = data.subarray(0, 8);
 
-          // BridgeDeposit event discriminator
-          // In production, compute this from the event name hash
+          // SECURITY FIX (VAL-8): Only process known bridge event discriminators
+          if (!discriminator.equals(BRIDGE_DEPOSIT_DISC) && !discriminator.equals(BRIDGE_DEPOSIT_SPL_DISC)) {
+            continue; // Skip non-deposit events
+          }
+
           const event = this.decodeBridgeDeposit(data.subarray(8), slot, logs.signature);
           if (event) {
             events.push(event);

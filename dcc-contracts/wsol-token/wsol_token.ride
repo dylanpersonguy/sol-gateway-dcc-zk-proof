@@ -12,9 +12,11 @@ let wsolName = "Wrapped SOL"
 let wsolDescription = "Wrapped SOL bridged from Solana via sol-gateway-dcc"
 
 func keyBridgeContract() = "bridge_contract"
+func keyBridgePublicKey() = "bridge_public_key"
 func keyAssetId() = "wsol_asset_id"  
 func keyFrozen() = "frozen"
 func keyAdmin() = "admin"
+func keyAdminPublicKey() = "admin_public_key"
 func keyTotalIssued() = "total_issued"
 
 func isBridge(caller: Address) = {
@@ -36,7 +38,7 @@ func isFrozen() = {
 
 # Initialize the wSOL token
 @Callable(i)
-func initialize(bridgeContract: String) = {
+func initialize(bridgeContract: String, bridgePublicKey: String) = {
     if (isDefined(getString(this, keyAdmin()))) then throw("Already initialized")
     else {
         let issue = Issue(wsolName, wsolDescription, 0, wsolDecimals, true)
@@ -44,7 +46,9 @@ func initialize(bridgeContract: String) = {
         [
             issue,
             StringEntry(keyAdmin(), i.caller.toString()),
+            StringEntry(keyAdminPublicKey(), toBase58String(i.callerPublicKey)),
             StringEntry(keyBridgeContract(), bridgeContract),
+            StringEntry(keyBridgePublicKey(), bridgePublicKey),
             StringEntry(keyAssetId(), toBase58String(assetId)),
             BooleanEntry(keyFrozen(), false),
             IntegerEntry(keyTotalIssued(), 0)
@@ -84,17 +88,19 @@ func verify() = {
     match tx {
         case t: ReissueTransaction =>
             # Only bridge controller can reissue (mint)
-            let bridge = getStringValue(this, keyBridgeContract())
-            sigVerify(t.bodyBytes, t.proofs[0], fromBase58String(bridge))
+            # SECURITY FIX (VULN-11): Use stored public key instead of address.
+            # fromBase58String(address) is NOT a valid public key for sigVerify.
+            let bridgePubKey = getStringValue(this, keyBridgePublicKey())
+            sigVerify(t.bodyBytes, t.proofs[0], fromBase58String(bridgePubKey))
         case t: BurnTransaction =>
             # Bridge controller can burn
-            let bridge = getStringValue(this, keyBridgeContract())
-            sigVerify(t.bodyBytes, t.proofs[0], fromBase58String(bridge))
+            let bridgePubKey = getStringValue(this, keyBridgePublicKey())
+            sigVerify(t.bodyBytes, t.proofs[0], fromBase58String(bridgePubKey))
         case t: InvokeScriptTransaction =>
             sigVerify(t.bodyBytes, t.proofs[0], t.senderPublicKey)
         case _ =>
             # All other transaction types require admin signature
-            let admin = getStringValue(this, keyAdmin())
-            sigVerify(tx.bodyBytes, tx.proofs[0], fromBase58String(admin))
+            let adminPubKey = getStringValue(this, keyAdminPublicKey())
+            sigVerify(tx.bodyBytes, tx.proofs[0], fromBase58String(adminPubKey))
     }
 }

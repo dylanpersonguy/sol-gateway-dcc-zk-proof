@@ -23,6 +23,9 @@ export interface DccBurnEvent {
 
 export interface DccWatcherConfig {
   nodeUrl: string;
+  /** SECURITY FIX (VAL-7): Secondary DCC node URL for multi-node verification.
+   *  If set, burn events must be confirmed by BOTH nodes. */
+  secondaryNodeUrl?: string;
   bridgeContract: string;
   requiredConfirmations: number;
   pollIntervalMs: number;
@@ -30,6 +33,7 @@ export interface DccWatcherConfig {
 
 export class DccWatcher extends EventEmitter {
   private client: AxiosInstance;
+  private secondaryClient: AxiosInstance | null;
   private config: DccWatcherConfig;
   private logger: Logger;
   private isRunning: boolean = false;
@@ -43,6 +47,10 @@ export class DccWatcher extends EventEmitter {
       baseURL: config.nodeUrl,
       timeout: 15000,
     });
+    // SECURITY FIX (VAL-7): Initialize secondary client for multi-node verification
+    this.secondaryClient = config.secondaryNodeUrl
+      ? axios.create({ baseURL: config.secondaryNodeUrl, timeout: 15000 })
+      : null;
     this.logger = createLogger('DccWatcher');
   }
 
@@ -258,6 +266,35 @@ export class DccWatcher extends EventEmitter {
           burnHeight,
         });
         return false;
+      }
+
+      // SECURITY FIX (VAL-7): Cross-verify burn data against secondary DCC node.
+      // Trusting a single node allows a compromised node to feed fabricated burns.
+      if (this.secondaryClient) {
+        try {
+          const secondaryDataResp = await this.secondaryClient.get(
+            `/addresses/data/${this.config.bridgeContract}/burn_${burnId}`
+          );
+          if (secondaryDataResp.status !== 200 || !secondaryDataResp.data?.value) {
+            this.logger.error('Burn NOT confirmed by secondary DCC node', { burnId });
+            return false;
+          }
+          // Verify the burn data matches between nodes
+          if (secondaryDataResp.data.value !== dataResp.data.value) {
+            this.logger.error('Burn data MISMATCH between DCC nodes — possible node compromise', {
+              burnId,
+              primary: dataResp.data.value,
+              secondary: secondaryDataResp.data.value,
+            });
+            return false;
+          }
+        } catch (err: any) {
+          this.logger.warn('Secondary DCC node verification failed — rejecting burn (fail-closed)', {
+            burnId,
+            error: err.message,
+          });
+          return false;
+        }
       }
 
       return true;

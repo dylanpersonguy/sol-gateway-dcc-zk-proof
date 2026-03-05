@@ -23,7 +23,8 @@ pub struct BridgeDeposit {
     /// Solana slot at deposit time
     pub slot: u64,
     /// Event index within the checkpoint window
-    pub event_index: u32,
+    /// SECURITY FIX (LOW-1): Widened from u32 to u64.
+    pub event_index: u64,
     /// Unix timestamp
     pub timestamp: i64,
     /// Solana chain ID (domain separation)
@@ -55,7 +56,8 @@ pub struct BridgeDepositSpl {
     /// Solana slot at deposit time
     pub slot: u64,
     /// Event index within the checkpoint window
-    pub event_index: u32,
+    /// SECURITY FIX (LOW-1): Widened from u32 to u64.
+    pub event_index: u64,
     /// Unix timestamp
     pub timestamp: i64,
     /// Solana chain ID (domain separation)

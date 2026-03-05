@@ -45,7 +45,11 @@ export function calculateDepositFee(
   const feeRate = useZk ? config.depositFeeRateZk : config.depositFeeRateCommittee;
   const feeDisplay = useZk ? '0.15%' : '0.10%';
 
-  const calculatedFee = BigInt(Math.floor(Number(amountLamports) * feeRate));
+  // SECURITY FIX (VAL-4): Pure integer BPS arithmetic.
+  // Previous code used BigInt→Number→float→BigInt which is lossy for values > 2^53
+  // and can produce different results across validators (consensus break).
+  const feeRateBps = BigInt(Math.round(feeRate * 10000));
+  const calculatedFee = (amountLamports * feeRateBps) / 10000n;
   const feeLamports = calculatedFee < config.minFeeLamports
     ? config.minFeeLamports
     : calculatedFee;
@@ -78,7 +82,9 @@ export function calculateWithdrawalFee(
   const feeRate = useZk ? config.withdrawalFeeRateZk : config.withdrawalFeeRateCommittee;
   const feeDisplay = useZk ? '0.50%' : '0.25%';
 
-  const calculatedFee = BigInt(Math.floor(Number(amountLamports) * feeRate));
+  // SECURITY FIX (VAL-4): Pure integer BPS arithmetic — see deposit fee for details.
+  const feeRateBps = BigInt(Math.round(feeRate * 10000));
+  const calculatedFee = (amountLamports * feeRateBps) / 10000n;
   const feeLamports = calculatedFee < config.minFeeLamports
     ? config.minFeeLamports
     : calculatedFee;

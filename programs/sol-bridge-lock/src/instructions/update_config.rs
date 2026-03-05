@@ -60,7 +60,9 @@ pub fn handler(ctx: Context<UpdateConfig>, params: UpdateConfigParams) -> Result
     }
 
     if let Some(large_withdrawal_delay) = params.large_withdrawal_delay {
-        require!(large_withdrawal_delay >= 0, BridgeError::InvalidConfig);
+        // SECURITY FIX (MED-4): Enforce minimum delay of 300 seconds (5 minutes).
+        // A delay of 0 effectively disables the timelock on large withdrawals.
+        require!(large_withdrawal_delay >= 300, BridgeError::InvalidConfig);
         config.large_withdrawal_delay = large_withdrawal_delay;
     }
 
@@ -69,16 +71,23 @@ pub fn handler(ctx: Context<UpdateConfig>, params: UpdateConfigParams) -> Result
     }
 
     if let Some(min_validators) = params.min_validators {
+        // SECURITY FIX (MED-5): Enforce minimum validator count of 3.
+        // min_validators=1 converts the multi-sig into a single-sig,
+        // eliminating the security benefit of distributed validation.
         require!(
-            min_validators >= 1 && min_validators <= config.max_validators,
+            min_validators >= 3 && min_validators <= config.max_validators,
             BridgeError::InvalidConfig
         );
         config.min_validators = min_validators;
     }
 
     if let Some(new_authority) = params.new_authority {
-        config.authority = new_authority;
-        msg!("Authority transferred to: {}", new_authority);
+        // SECURITY FIX (HIGH-3): Two-step authority transfer with timelock.
+        // Instead of immediately overwriting, store as pending. The new authority
+        // must call accept_authority after a minimum 24h timelock.
+        config.pending_authority = new_authority;
+        config.authority_transfer_requested_at = Clock::get()?.unix_timestamp;
+        msg!("Authority transfer proposed to: {}. Must be accepted after 24h timelock.", new_authority);
     }
 
     if let Some(new_guardian) = params.new_guardian {
@@ -93,5 +102,55 @@ pub fn handler(ctx: Context<UpdateConfig>, params: UpdateConfigParams) -> Result
     }
 
     msg!("Bridge config updated");
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ACCEPT AUTHORITY — Step 2 of two-step authority transfer (HIGH-3 fix)
+// ═══════════════════════════════════════════════════════════════
+
+/// Minimum timelock for authority transfer: 24 hours
+const AUTHORITY_TRANSFER_TIMELOCK: i64 = 86400;
+
+#[derive(Accounts)]
+pub struct AcceptAuthority<'info> {
+    #[account(
+        mut,
+        seeds = [b"bridge_config"],
+        bump = bridge_config.bump,
+        // Only the pending authority can accept
+        constraint = bridge_config.pending_authority == new_authority.key() @ BridgeError::Unauthorized,
+    )]
+    pub bridge_config: Account<'info, BridgeConfig>,
+
+    pub new_authority: Signer<'info>,
+}
+
+pub fn accept_authority_handler(ctx: Context<AcceptAuthority>) -> Result<()> {
+    let config = &mut ctx.accounts.bridge_config;
+
+    // Must have a pending transfer
+    require!(
+        config.authority_transfer_requested_at > 0,
+        BridgeError::NoAuthorityTransferPending
+    );
+
+    let clock = Clock::get()?;
+    let elapsed = clock.unix_timestamp - config.authority_transfer_requested_at;
+    require!(
+        elapsed >= AUTHORITY_TRANSFER_TIMELOCK,
+        BridgeError::AuthorityTransferTimelockNotElapsed
+    );
+
+    let old_authority = config.authority;
+    config.authority = config.pending_authority;
+    config.pending_authority = Pubkey::default();
+    config.authority_transfer_requested_at = 0;
+
+    msg!(
+        "Authority transferred: {} → {}",
+        old_authority,
+        config.authority
+    );
     Ok(())
 }
