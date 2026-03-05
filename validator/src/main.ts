@@ -247,20 +247,27 @@ async function main(): Promise<void> {
     const useZk = amountBigint >= ZK_ONLY_THRESHOLD;
 
     // ── Fee Calculation ──
+    // Apply fee BEFORE consensus so all validators sign over the net (fee-adjusted) amount.
+    // This ensures the canonical message hash matches the amount passed to DCC committeeMint.
     const depositFee = calculateDepositFee(amountBigint, config);
     logFee(depositFee, event.transferId);
+
+    // Create a fee-adjusted copy of the event — consensus signs over net amount
+    const feeAdjustedEvent = { ...event, amount: depositFee.netAmountLamports };
 
     if (!useZk) {
       // Under 100 SOL: committee fast-path (no ZK proof needed)
       logger.info('Small deposit → committee-only path (ZK skipped)', {
         transferId: event.transferId,
-        amount: amountBigint.toString(),
+        originalAmount: amountBigint.toString(),
+        netAmount: depositFee.netAmountLamports.toString(),
+        feeDeducted: depositFee.feeLamports.toString(),
         threshold: ZK_ONLY_THRESHOLD.toString(),
       });
       consensus.proposeAttestation({
         type: 'mint',
         transferId: event.transferId,
-        event,
+        event: feeAdjustedEvent,
         timestamp: Date.now(),
       });
     } else {
@@ -310,10 +317,25 @@ async function main(): Promise<void> {
       return;
     }
 
+    // ── Fee Calculation ──
+    // Apply fee BEFORE consensus so all validators sign over the net (fee-adjusted) amount.
+    const withdrawalFee = calculateWithdrawalFee(amountBigint, config);
+    logFee(withdrawalFee, event.burnId);
+
+    // Create a fee-adjusted copy — consensus signs over net amount
+    const feeAdjustedBurn = { ...event, amount: withdrawalFee.netAmountLamports };
+
+    logger.info('Withdrawal fee applied before consensus', {
+      burnId: event.burnId,
+      originalAmount: amountBigint.toString(),
+      netAmount: withdrawalFee.netAmountLamports.toString(),
+      feeDeducted: withdrawalFee.feeLamports.toString(),
+    });
+
     consensus.proposeAttestation({
       type: 'unlock',
       transferId: event.burnId,
-      event,
+      event: feeAdjustedBurn,
       timestamp: Date.now(),
     });
   });
@@ -491,25 +513,20 @@ async function submitMintToDcc(
     return result || '1';
   }
   const recipient = toBase58(Buffer.from(recipientTrimmed));
-  const originalAmount = Number(depositEvent.amount);
+  // Event already has fee-adjusted amount (applied before consensus signing)
+  const amount = Number(depositEvent.amount);
   const solSlot = depositEvent.slot;
 
-  if (!recipient || originalAmount <= 0) {
+  if (!recipient || amount <= 0) {
     throw new Error(`Invalid deposit event data for transfer ${result.transferId}`);
   }
-
-  // ── Fee Deduction: mint (amount - fee) → fee stays in vault as surplus ──
-  const depositFee = calculateDepositFee(BigInt(depositEvent.amount), config);
-  logFee(depositFee, result.transferId);
-  const amount = Number(depositFee.netAmountLamports);
 
   logger.info('Resolved DCC recipient address', {
     transferId: result.transferId,
     recipientHex: recipientHex.slice(0, 20) + '...',
     recipientDcc: recipient,
-    originalAmount,
-    feeDeducted: Number(depositFee.feeLamports),
     mintAmount: amount,
+    note: 'Fee already deducted before consensus',
     solSlot,
   });
 
@@ -565,20 +582,15 @@ async function submitUnlockToSolana(
   const burnEvent = (result as any).event as DccBurnEvent;
   const transferIdBytes = Buffer.from(result.transferId, 'hex');
   const recipientPubkey = new PublicKey(burnEvent?.solRecipient || PublicKey.default.toBase58());
-  const originalAmount = BigInt(burnEvent?.amount || 0);
+  // Event already has fee-adjusted amount (applied before consensus signing)
+  const amount = BigInt(burnEvent?.amount || 0);
   const burnTxHash = Buffer.from(burnEvent?.txId || '', 'hex');
   const expiration = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
 
-  // ── Fee Deduction: unlock (amount - fee) → fee stays in vault as surplus ──
-  const withdrawalFee = calculateWithdrawalFee(originalAmount, config);
-  logFee(withdrawalFee, result.transferId);
-  const amount = withdrawalFee.netAmountLamports;
-
-  logger.info('Withdrawal fee applied', {
+  logger.info('Preparing unlock', {
     transferId: result.transferId,
-    originalAmount: originalAmount.toString(),
-    feeDeducted: withdrawalFee.feeLamports.toString(),
     unlockAmount: amount.toString(),
+    note: 'Fee already deducted before consensus',
   });
 
   // ── Construct the canonical message (must match on-chain construct_unlock_message) ──
