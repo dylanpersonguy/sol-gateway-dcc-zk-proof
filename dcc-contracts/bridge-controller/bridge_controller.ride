@@ -180,6 +180,24 @@ func verifyValidatorSignatures(
     if (count < minRequired) then throw("Insufficient signatures: " + count.toString() + " < " + minRequired.toString())
     else if (count != size(pubkeys)) then throw("Signatures/pubkeys length mismatch")
     else {
+        # SECURITY FIX (CRIT-5): Reject duplicate public keys.
+        # Without this check, a single compromised validator key can be repeated
+        # N times to reach the multi-sig threshold, breaking the entire scheme.
+        let dupIndices = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+        func outerDupCheck(hasDup: Boolean, i: Int) = {
+            if (hasDup || i >= count) then hasDup
+            else {
+                func innerDupCheck(found: Boolean, j: Int) = {
+                    if (found || j >= i) then found
+                    else pubkeys[j] == pubkeys[i]
+                }
+                FOLD<20>(dupIndices, false, innerDupCheck)
+            }
+        }
+        let hasDuplicateKey = FOLD<20>(dupIndices, false, outerDupCheck)
+        if (hasDuplicateKey) then throw("Duplicate public key detected — rejected")
+        else {
+
         func verifyOne(acc: Int, idx: Int) = {
             if (idx >= count) then acc
             else {
@@ -201,6 +219,7 @@ func verifyValidatorSignatures(
         
         if (valid < minRequired) then throw("Valid signatures below threshold")
         else true
+        }
     }
 }
 
@@ -779,5 +798,25 @@ func getTokenInfo(splMint: String) = {
             [],
             (name, dccAssetId, solDec, dccDec, enabled, minted, burned)
         )
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# VERIFIER — SECURITY FIX (CRIT-6): Prevents direct state manipulation
+# ═══════════════════════════════════════════════════════════════
+#
+# Without this @Verifier, RIDE's default behavior accepts DataTransactions
+# signed by the deployer key. A compromised deployer could:
+#   - Reset replay protection (processed_ entries)
+#   - Add attacker-controlled validators
+#   - Transfer admin, corrupt any storage key
+# This verifier blocks ALL DataTransactions and requires proper
+# signature verification for all other transaction types.
+
+@Verifier(tx)
+func verify() = {
+    match tx {
+        case dt: DataTransaction => false
+        case _ => sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
     }
 }

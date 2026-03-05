@@ -136,18 +136,49 @@ pub fn handler(ctx: Context<Unlock>, params: UnlockParams) -> Result<()> {
     );
 
     // ── Verify each validator signature ──
-    // In production, these would be verified via the Ed25519 precompile
-    // For now, we verify the validator is in the active set
-    // Actual Ed25519 verification happens via instruction introspection
+    // SECURITY FIX (CRIT-1): Validate remaining_accounts are legitimate validator PDAs.
+    // Each account MUST be:
+    //   1. Owned by this program (prevents forged accounts on other programs)
+    //   2. Have correct Anchor discriminator for ValidatorEntry
+    //   3. Derive from expected PDA seeds [b"validator", validator_pubkey]
+    //   4. Be marked as active
     let mut valid_sigs = 0u8;
 
+    // Pre-compute the ValidatorEntry discriminator (first 8 bytes of SHA256("account:ValidatorEntry"))
+    let validator_discriminator: [u8; 8] = {
+        let mut hasher = anchor_lang::solana_program::hash::Hasher::default();
+        hasher.hash(b"account:ValidatorEntry");
+        let hash = hasher.result();
+        let mut disc = [0u8; 8];
+        disc.copy_from_slice(&hash.to_bytes()[..8]);
+        disc
+    };
+
     for attestation in &params.attestations {
-        // Find validator entry in remaining accounts
+        // Find validator entry in remaining accounts with FULL validation
         let validator_found = ctx.remaining_accounts.iter().any(|acc| {
-            // Deserialize manually to avoid lifetime issues
+            // CHECK 1: Account must be owned by THIS program
+            if acc.owner != ctx.program_id {
+                return false;
+            }
+
+            // CHECK 2: Verify PDA derivation — account address must match
+            // the expected PDA seeds [b"validator", validator_pubkey]
+            let (expected_pda, _bump) = Pubkey::find_program_address(
+                &[b"validator", attestation.validator.as_ref()],
+                ctx.program_id,
+            );
+            if acc.key() != expected_pda {
+                return false;
+            }
+
             let data = acc.try_borrow_data();
             if let Ok(data) = data {
                 if data.len() >= ValidatorEntry::LEN {
+                    // CHECK 3: Verify Anchor account discriminator
+                    if data[..8] != validator_discriminator {
+                        return false;
+                    }
                     // Skip 8-byte discriminator, read pubkey (32 bytes) and active (1 byte)
                     let pubkey = Pubkey::try_from(&data[8..40]).unwrap_or_default();
                     let active = data[40] != 0;

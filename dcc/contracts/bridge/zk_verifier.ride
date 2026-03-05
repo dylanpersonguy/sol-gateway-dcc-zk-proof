@@ -489,7 +489,17 @@ func verifyAndMint(
             throw("ZK PROOF VERIFICATION FAILED — mint rejected")
         else {
 
-        # STEP 6: Cross-contract call to Bridge Core for actual minting
+        # STEP 6: SECURITY FIX (CRIT-3) — Bind recipientAddress to proof recipient.
+        # The recipientAddress string MUST correspond to the recipient ByteVector
+        # proven inside the ZK proof. Without this check, an attacker can front-run
+        # any ZK mint by replacing recipientAddress with their own address.
+        let recipientAddrBytes = addressFromStringValue(recipientAddress).bytes
+        # recipient is 32 bytes: 26-byte DCC address bytes + 6 zero-pad bytes
+        if (take(recipient, size(recipientAddrBytes)) != recipientAddrBytes) then
+            throw("CRITICAL: recipientAddress does not match proof recipient")
+        else {
+
+        # STEP 7: Cross-contract call to Bridge Core for actual minting
         let bridgeCoreAddr = getStringValue(this, keyBridgeCoreAddress())
         let mintResult = invoke(
             addressFromStringValue(bridgeCoreAddr),
@@ -505,6 +515,7 @@ func verifyAndMint(
         }
         else throw("Unreachable")
 
+        }
         }
         }
         }

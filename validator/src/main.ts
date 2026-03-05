@@ -585,7 +585,11 @@ async function submitUnlockToSolana(
   // Event already has fee-adjusted amount (applied before consensus signing)
   const amount = BigInt(burnEvent?.amount || 0);
   const burnTxHash = Buffer.from(burnEvent?.txId || '', 'hex');
-  const expiration = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+  // SECURITY FIX (CRIT-7): Use the SAME timestamp that was used during consensus signing.
+  // Previously this used Date.now() which produces a different expiration than what
+  // validators signed, causing Ed25519 verification to fail on-chain.
+  const requestTimestamp = (result as any).requestTimestamp || Date.now();
+  const expiration = Math.floor(requestTimestamp / 1000) + 3600;
 
   logger.info('Preparing unlock', {
     transferId: result.transferId,

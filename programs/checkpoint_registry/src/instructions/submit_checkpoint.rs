@@ -112,6 +112,16 @@ pub fn handler(ctx: Context<SubmitCheckpoint>, params: SubmitCheckpointParams) -
     let mut seen_members: Vec<Pubkey> = Vec::new();
     let mut valid_sigs = 0u8;
 
+    // Pre-compute the CommitteeMember discriminator (first 8 bytes of SHA256("account:CommitteeMember"))
+    let member_discriminator: [u8; 8] = {
+        let mut hasher = anchor_lang::solana_program::hash::Hasher::default();
+        hasher.hash(b"account:CommitteeMember");
+        let hash = hasher.result();
+        let mut disc = [0u8; 8];
+        disc.copy_from_slice(&hash.to_bytes()[..8]);
+        disc
+    };
+
     for attestation in &params.attestations {
         // No duplicate signers
         require!(
@@ -120,11 +130,34 @@ pub fn handler(ctx: Context<SubmitCheckpoint>, params: SubmitCheckpointParams) -
         );
         seen_members.push(attestation.member);
 
-        // Verify member is active via remaining accounts
+        // SECURITY FIX (CRIT-2): Validate remaining_accounts are legitimate CommitteeMember PDAs.
+        // Each account MUST be:
+        //   1. Owned by this program (prevents forged accounts on other programs)
+        //   2. Have correct Anchor discriminator for CommitteeMember
+        //   3. Derive from expected PDA seeds [b"member", member_pubkey]
+        //   4. Be marked as active
         let member_found = ctx.remaining_accounts.iter().any(|acc| {
+            // CHECK 1: Account must be owned by THIS program
+            if acc.owner != ctx.program_id {
+                return false;
+            }
+
+            // CHECK 2: Verify PDA derivation
+            let (expected_pda, _bump) = Pubkey::find_program_address(
+                &[b"member", attestation.member.as_ref()],
+                ctx.program_id,
+            );
+            if acc.key() != expected_pda {
+                return false;
+            }
+
             let data = acc.try_borrow_data();
             if let Ok(data) = data {
                 if data.len() >= CommitteeMember::LEN {
+                    // CHECK 3: Verify Anchor account discriminator
+                    if data[..8] != member_discriminator {
+                        return false;
+                    }
                     let pubkey = Pubkey::try_from(&data[8..40]).unwrap_or_default();
                     let active = data[40] != 0;
                     pubkey == attestation.member && active

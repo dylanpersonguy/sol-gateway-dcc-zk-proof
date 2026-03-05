@@ -284,6 +284,24 @@ func committeeMint(
             # Construct canonical message for signature verification
             let message = toBytes(transferId + "|" + recipient + "|" + amount.toString() + "|" + solSlot.toString())
 
+            # SECURITY FIX (CRIT-4): Reject duplicate public keys.
+            # Without this check, a single compromised committee key can be repeated
+            # N times to reach the multi-sig threshold, breaking the entire scheme.
+            let dupIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+            func outerDupCheck(hasDup: Boolean, i: Int) = {
+                if (hasDup || i >= size(pubkeys)) then hasDup
+                else {
+                    func innerDupCheck(found: Boolean, j: Int) = {
+                        if (found || j >= i) then found
+                        else pubkeys[j] == pubkeys[i]
+                    }
+                    FOLD<10>(dupIndices, false, innerDupCheck)
+                }
+            }
+            let hasDuplicateKey = FOLD<10>(dupIndices, false, outerDupCheck)
+            if (hasDuplicateKey) then throw("Duplicate public key detected — rejected")
+            else {
+
             # Verify committee signatures using index-based fold
             let indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
             func checkOneSig(acc: Int, idx: Int) = {
@@ -346,6 +364,7 @@ func committeeMint(
                         ]
                     }
                 }
+            }
             }
         }
     }

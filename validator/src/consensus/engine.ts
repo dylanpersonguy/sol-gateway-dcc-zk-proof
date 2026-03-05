@@ -55,6 +55,12 @@ export interface ConsensusResult {
   requiredSignatures: number;
   receivedSignatures: number;
   event?: SolanaDepositEvent | DccBurnEvent;
+  /** Original request timestamp (ms since epoch) — MUST be used for
+   *  deterministic expiration computation in the unlock submission.
+   *  SECURITY FIX (CRIT-7): Using Date.now() at submission time produces
+   *  a different expiration than what validators signed during consensus,
+   *  causing Ed25519 verification failure on-chain. */
+  requestTimestamp?: number;
 }
 
 type SignCallback = (message: Buffer) => Promise<Buffer>;
@@ -332,6 +338,7 @@ export class ConsensusEngine extends EventEmitter {
         requiredSignatures: this.config.minValidators,
         receivedSignatures: pending.attestations.length,
         event: pending.request.event,
+        requestTimestamp: pending.request.timestamp,
       };
 
       this.processedTransfers.add(transferId);
