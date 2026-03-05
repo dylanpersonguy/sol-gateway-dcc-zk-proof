@@ -1359,11 +1359,20 @@ export class ZkBridgeService extends EventEmitter {
     const B_SIGNER = { privateKey: privateKey(B_SEED) };
     const bPubKey = pubKeyFn(B_SEED);
 
+    // ── FEE NOTE (ZK Path): Cannot deduct fee here ──
+    // Strategy A in RIDE Contract B cross-validates event.amount against the
+    // ZK proof's public signals.  Passing (amount - fee) would cause a
+    // "amount mismatch" revert.  Fee deduction on the ZK path requires a
+    // RIDE contract update to: verify full amount from proof, then mint
+    // (amount - fee).  Until then, ZK-path deposits are fee-exempt.
+    // TODO: Update RIDE Contract B verifyAndMint to deduct fee post-verify.
+
     logger.info('Submitting verifyAndMint to Contract B', {
       transferId: event.transferId,
       recipient: recipientAddress,
       amount: event.amount,
       checkpointId: window.checkpointId,
+      feeNote: 'ZK path — fee not deducted (requires RIDE contract update)',
     });
 
     const tx = invokeScript(
@@ -1382,7 +1391,7 @@ export class ZkBridgeService extends EventEmitter {
             { type: 'integer', value: event.eventIndex || 0 },
             { type: 'binary', value: `base64:${senderBase64}` },
             { type: 'binary', value: `base64:${recipientBytesBase64}` },
-            { type: 'integer', value: Number(event.amount) },
+            { type: 'integer', value: Number(event.amount) },  // Full amount — fee deduction requires RIDE update
             { type: 'integer', value: Number(event.nonce || 0) },
             { type: 'binary', value: `base64:${assetIdBase64}` },
             { type: 'string', value: recipientAddress },

@@ -20,6 +20,7 @@ import { ThresholdSigner } from './signer/threshold-signer';
 import { P2PTransport } from './p2p/transport';
 import { createLogger } from './utils/logger';
 import { RateLimiter } from './utils/rate-limiter';
+import { calculateDepositFee, calculateWithdrawalFee, logFee } from './utils/fee-calculator';
 import { ZkBridgeService } from './zk/zk-bridge-service';
 import {
   Connection,
@@ -244,6 +245,10 @@ async function main(): Promise<void> {
     // Amount-based routing: ≥100 SOL → ZK proof required, <100 SOL → committee fast-path only
     const ZK_ONLY_THRESHOLD = BigInt(process.env.ZK_ONLY_THRESHOLD_LAMPORTS || '100000000000'); // 100 SOL
     const useZk = amountBigint >= ZK_ONLY_THRESHOLD;
+
+    // ── Fee Calculation ──
+    const depositFee = calculateDepositFee(amountBigint, config);
+    logFee(depositFee, event.transferId);
 
     if (!useZk) {
       // Under 100 SOL: committee fast-path (no ZK proof needed)
@@ -486,18 +491,25 @@ async function submitMintToDcc(
     return result || '1';
   }
   const recipient = toBase58(Buffer.from(recipientTrimmed));
-  const amount = Number(depositEvent.amount);
+  const originalAmount = Number(depositEvent.amount);
   const solSlot = depositEvent.slot;
 
-  if (!recipient || amount <= 0) {
+  if (!recipient || originalAmount <= 0) {
     throw new Error(`Invalid deposit event data for transfer ${result.transferId}`);
   }
+
+  // ── Fee Deduction: mint (amount - fee) → fee stays in vault as surplus ──
+  const depositFee = calculateDepositFee(BigInt(depositEvent.amount), config);
+  logFee(depositFee, result.transferId);
+  const amount = Number(depositFee.netAmountLamports);
 
   logger.info('Resolved DCC recipient address', {
     transferId: result.transferId,
     recipientHex: recipientHex.slice(0, 20) + '...',
     recipientDcc: recipient,
-    amount,
+    originalAmount,
+    feeDeducted: Number(depositFee.feeLamports),
+    mintAmount: amount,
     solSlot,
   });
 
@@ -553,9 +565,21 @@ async function submitUnlockToSolana(
   const burnEvent = (result as any).event as DccBurnEvent;
   const transferIdBytes = Buffer.from(result.transferId, 'hex');
   const recipientPubkey = new PublicKey(burnEvent?.solRecipient || PublicKey.default.toBase58());
-  const amount = BigInt(burnEvent?.amount || 0);
+  const originalAmount = BigInt(burnEvent?.amount || 0);
   const burnTxHash = Buffer.from(burnEvent?.txId || '', 'hex');
   const expiration = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+
+  // ── Fee Deduction: unlock (amount - fee) → fee stays in vault as surplus ──
+  const withdrawalFee = calculateWithdrawalFee(originalAmount, config);
+  logFee(withdrawalFee, result.transferId);
+  const amount = withdrawalFee.netAmountLamports;
+
+  logger.info('Withdrawal fee applied', {
+    transferId: result.transferId,
+    originalAmount: originalAmount.toString(),
+    feeDeducted: withdrawalFee.feeLamports.toString(),
+    unlockAmount: amount.toString(),
+  });
 
   // ── Construct the canonical message (must match on-chain construct_unlock_message) ──
   const domainSeparator = Buffer.from('SOL_DCC_BRIDGE_UNLOCK_V1');

@@ -84,6 +84,18 @@ class BridgeApi {
     const { data } = await this.client.get('/redeem/limits');
     return data;
   }
+
+  async getFees() {
+    const { data } = await this.client.get('/fees');
+    return data;
+  }
+
+  async getFeeQuote(amount: number, direction: 'deposit' | 'withdrawal') {
+    const { data } = await this.client.get('/fees/quote', {
+      params: { amount, direction },
+    });
+    return data;
+  }
 }
 
 export const bridgeApi = new BridgeApi();

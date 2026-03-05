@@ -11,6 +11,7 @@ type SectionId =
   | 'how-it-works'
   | 'dual-path'
   | 'zk-proofs'
+  | 'fees'
   | 'security'
   | 'threat-model'
   | 'status'
@@ -24,6 +25,7 @@ const NAV: { id: SectionId; label: string; icon: string }[] = [
   { id: 'how-it-works', label: 'How It Works', icon: '⇄' },
   { id: 'dual-path', label: 'Dual-Path Routing', icon: '⚡' },
   { id: 'zk-proofs', label: 'ZK Proofs', icon: 'π' },
+  { id: 'fees', label: 'Bridge Fees', icon: '💰' },
   { id: 'security', label: 'Security', icon: '🛡️' },
   { id: 'threat-model', label: 'Threat Model', icon: '⚠️' },
   { id: 'status', label: 'Status & Caps', icon: '📊' },
@@ -529,7 +531,71 @@ export function DocsPage() {
             </div>
           </Card>
 
-          {/* ═══════ §6 SECURITY ═══════ */}
+          {/* ═══════ §6 BRIDGE FEES ═══════ */}
+          <SectionHeading id="fees" icon="💰" title="Bridge Fees" />
+          <Card className="space-y-6">
+            <p className="text-sm text-gray-300 leading-relaxed">
+              The bridge charges <strong className="text-white">asymmetric fees</strong> — lower on deposits (to attract TVL) and higher on withdrawals
+              (to protect the vault). Fees vary by routing path.
+            </p>
+
+            <div className="space-y-4">
+              <h4 className="text-sm font-semibold text-green-400 uppercase tracking-wider">Deposit Fees (SOL → DCC)</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="bg-gray-800/60 rounded-xl p-4 border border-green-500/20">
+                  <div className="text-green-400 text-xs font-medium mb-1">⚡ Committee Fast-Path</div>
+                  <div className="text-2xl font-bold text-white">0.10%</div>
+                  <div className="text-xs text-gray-500 mt-1">Deposits &lt; 100 SOL</div>
+                </div>
+                <div className="bg-gray-800/60 rounded-xl p-4 border border-purple-500/20">
+                  <div className="text-purple-400 text-xs font-medium mb-1">🔐 ZK Proof Path</div>
+                  <div className="text-2xl font-bold text-white">0.15%</div>
+                  <div className="text-xs text-gray-500 mt-1">Deposits ≥ 100 SOL</div>
+                </div>
+              </div>
+
+              <h4 className="text-sm font-semibold text-teal-400 uppercase tracking-wider mt-4">Withdrawal Fees (DCC → SOL)</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="bg-gray-800/60 rounded-xl p-4 border border-green-500/20">
+                  <div className="text-green-400 text-xs font-medium mb-1">⚡ Committee Fast-Path</div>
+                  <div className="text-2xl font-bold text-white">0.25%</div>
+                  <div className="text-xs text-gray-500 mt-1">Withdrawals &lt; 100 SOL</div>
+                </div>
+                <div className="bg-gray-800/60 rounded-xl p-4 border border-purple-500/20">
+                  <div className="text-purple-400 text-xs font-medium mb-1">🔐 ZK Proof Path</div>
+                  <div className="text-2xl font-bold text-white">0.50%</div>
+                  <div className="text-xs text-gray-500 mt-1">Withdrawals ≥ 100 SOL</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-yellow-900/20 border border-yellow-700/30 rounded-xl p-4">
+              <h4 className="text-sm font-semibold text-yellow-400 mb-2">Minimum Fee Floor</h4>
+              <p className="text-sm text-gray-300">
+                A minimum fee of <strong className="text-white">0.001 SOL</strong> is applied to all transfers,
+                ensuring micro-transactions cover network costs. The fee shown in the interface is always the higher of the
+                percentage-based fee or this floor.
+              </p>
+            </div>
+
+            <div className="bg-blue-900/20 border border-blue-700/30 rounded-xl p-4">
+              <h4 className="text-sm font-semibold text-blue-400 mb-2">Where Do Fees Go?</h4>
+              <p className="text-sm text-gray-300">
+                Fees accumulate as <strong className="text-white">surplus SOL</strong> inside the existing
+                Vault PDA — a trustless, program-owned account. The validator mints or unlocks
+                <code className="text-gray-400 mx-1">amount − fee</code> so the difference stays in the vault.
+                No separate fee wallet exists; the vault balance always exceeds the total DCC supply,
+                with the surplus representing protocol revenue.
+              </p>
+            </div>
+
+            <div className="text-xs text-gray-500 italic">
+              Fee calculation is available via the API at <code className="text-gray-400">GET /api/v1/fees/quote?amount=X&direction=deposit|withdrawal</code>.
+              Committee and withdrawal paths enforce fees at the validator level. ZK-path deposits (≥ 100 SOL) are currently fee-exempt pending a RIDE contract update.
+            </div>
+          </Card>
+
+          {/* ═══════ §7 SECURITY ═══════ */}
           <SectionHeading id="security" icon="🛡️" title="Security" />
           <Card className="space-y-6">
             <p className="text-sm text-gray-300 leading-relaxed">

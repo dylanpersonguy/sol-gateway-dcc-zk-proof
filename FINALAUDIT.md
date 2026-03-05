@@ -271,6 +271,9 @@ This document consolidates **all security assessments, operational upgrades, and
 | `recover-deposit.mjs` | Root script | Standalone recovery tool — regenerates proof and submits verifyAndMint for stuck deposits |
 | Consensus API notification | Validator `main.ts` | `consensus_reached` handler POSTs to API after `submitMintToDcc()` |
 | `.env` threshold fix | Environment | `ZK_ONLY_THRESHOLD_LAMPORTS=100000000000` — explicit 100 SOL |
+| **Bridge fee schedule** | Frontend + API + Validator | Asymmetric fees: 0.10–0.15% deposit, 0.25–0.50% withdrawal, 0.001 SOL min floor. Enforced at validator level (committee + withdrawal paths); ZK path pending RIDE update. Fees accumulate as vault PDA surplus. |
+| **Fee quote API** | API `routes/fees.ts` | `GET /fees` (schedule) + `GET /fees/quote` (calculator) endpoints |
+| **Fee display** | Frontend `DepositForm.tsx`, `RedeemForm.tsx` | Live fee breakdown with path indicator, min fee floor, receive amount |
 
 ---
 
@@ -526,6 +529,8 @@ ConsensusEngine:
 | `/api/v1/transfer/history/:address` | GET | Public | Transfer history for a wallet |
 | `/api/v1/deposit/*` | GET/POST | Public | Deposit instruction generation |
 | `/api/v1/redeem/*` | GET/POST | Public | Redeem instruction generation |
+| `/api/v1/fees` | GET | Public | Current fee schedule |
+| `/api/v1/fees/quote` | GET | Public | Fee quote calculator (`?amount=X&direction=deposit\|withdrawal`) |
 | `/api/v1/health` | GET | Public | Bridge health status |
 | `/api/v1/stats` | GET | Public | Bridge statistics |
 | `/api/v1/admin/*` | POST | Admin | Administrative operations |
@@ -583,7 +588,41 @@ The frontend automatically selects the correct step sequence based on transfer a
 | 5 | Minting wSOL.DCC | ~5s |
 | 6 | Complete | — |
 
-### 11.2 ZK Proof Sub-Steps (Expandable Panel)
+### 11.2 Bridge Fee Schedule
+
+The bridge charges asymmetric fees — lower on deposits (to attract TVL) and higher on withdrawals (to protect the vault). Fees are path-dependent:
+
+| Direction | Path | Fee Rate | Rationale |
+|-----------|------|----------|----------|
+| **Deposit** (SOL → DCC) | Committee (< 100 SOL) | **0.10%** | Low friction, attracts TVL |
+| **Deposit** (SOL → DCC) | ZK (≥ 100 SOL) | **0.15%** | Slightly higher to offset ZK compute cost |
+| **Withdrawal** (DCC → SOL) | Committee (< 100 SOL) | **0.25%** | Standard withdrawal premium |
+| **Withdrawal** (DCC → SOL) | ZK (≥ 100 SOL) | **0.50%** | Highest — large vault releases + ZK compute |
+
+**Minimum fee floor:** 0.001 SOL (~$0.15) — ensures micro-transfers cover transaction costs.
+
+#### Fee Vault Mechanism
+
+Fees are **not** routed to a separate wallet. Instead they accumulate as **surplus SOL** inside the existing **Vault PDA** (`A2CMs9oPjSW46NvQDKFDqBqxj9EMvoJbTKkJJP9WK96U`):
+
+- **Deposits:** User deposits `X` SOL into vault. Validators mint only `X − fee` wSOL.DCC on the DCC chain. The difference stays in the vault.
+- **Withdrawals:** User burns `Y` wSOL.DCC on DCC. Validators unlock only `Y − fee` SOL from vault. The difference stays in the vault.
+
+This means `vault_balance ≥ total_minted − total_burned` at all times, with the surplus representing accumulated protocol revenue. The vault PDA is program-owned and trustless — no single party can drain fees.
+
+#### Enforcement Status
+
+| Path | Fee Enforced? | Mechanism | Notes |
+|------|---------------|-----------|-------|
+| Committee deposit | ✅ Yes | Validators mint `amount − fee` | `submitMintToDcc` in validator deducts fee before calling Contract A |
+| Committee withdrawal | ✅ Yes | Validators unlock `amount − fee` | `submitUnlockToSolana` deducts fee before sending unlock tx |
+| ZK deposit | ❌ Not yet | Requires RIDE update | Strategy A in Contract B cross-validates full `amount` from proof; cannot pass fee-adjusted amount without RIDE contract update |
+
+**TODO:** Update RIDE Contract B `verifyAndMint` to: (1) verify full amount from ZK proof, (2) mint `amount − fee`. Until then, ZK-path deposits (≥ 100 SOL) are fee-exempt.
+
+**TODO:** Add `withdraw_fees` instruction to Solana program so accumulated vault surplus can be withdrawn by the program authority for protocol operations.
+
+### 11.3 ZK Proof Sub-Steps (Expandable Panel)
 
 When the ZK Proof Generation step is expanded, users see an animated real-time breakdown:
 
@@ -597,7 +636,7 @@ When the ZK Proof Generation step is expanded, users see an animated real-time b
 
 Features: animated progress bar, bouncing dot indicators, tech tags (Groth16, BN128 Curve, 8 Public Inputs, 3.5M Constraints).
 
-### 11.3 Path Badges
+### 11.4 Path Badges
 
 - **Green badge**: `⚡ Committee Fast-Path • <100 SOL`
 - **Purple badge**: `🔐 ZK Proof Path • ≥100 SOL`
@@ -606,7 +645,7 @@ Info cards display path-specific details:
 - **ZK**: Groth16 proof explanation, BN128 curve, constraint count
 - **Committee**: Validator count (3), consensus (3/3), average time (~45s)
 
-### 11.4 Security Properties
+### 11.5 Security Properties
 
 | Property | Status | Detail |
 |----------|--------|--------|
@@ -920,6 +959,8 @@ All 6 stuck deposits were successfully recovered using this tool.
 |------|----------|--------|
 | Cross-chain balance reconciliation daemon | High | ⚠️ Open |
 | Validator key rotation mechanism | High | ⚠️ Open |
+| ZK-path fee enforcement (RIDE Contract B update) | High | ⚠️ Open — fee-exempt until Contract B mints `amount − fee` post-verify |
+| Vault fee withdrawal instruction | Medium | ⚠️ Open — accumulated fees locked in PDA until program upgrade adds `withdraw_fees` |
 | Monitoring alerts for vault balance vs DCC supply | High | ℹ️ Prometheus + Grafana deployed |
 | Incident response runbook | Medium | ℹ️ Operational incidents documented in §17.2 |
 | Circuit upgrade path documentation | Medium | ⚠️ Open |

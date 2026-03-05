@@ -57,6 +57,13 @@ export interface ValidatorConfig {
   hsmPin: string;
   keyRotationIntervalHours: number;
 
+  // ── Bridge Fees ──
+  depositFeeRateCommittee: number;  // 0.001 = 0.10%
+  depositFeeRateZk: number;         // 0.0015 = 0.15%
+  withdrawalFeeRateCommittee: number; // 0.0025 = 0.25%
+  withdrawalFeeRateZk: number;      // 0.005 = 0.50%
+  minFeeLamports: bigint;           // 1_000_000 = 0.001 SOL
+
   // ── ZK Bridge (Phase 2) ──
   zkVerifierContract: string;
   zkWasmPath: string;
@@ -108,6 +115,13 @@ export function loadConfig(): ValidatorConfig {
     hsmSlot: parseInt(process.env.HSM_SLOT || '0'),
     hsmPin: process.env.HSM_PIN || '',
     keyRotationIntervalHours: parseInt(process.env.KEY_ROTATION_HOURS || '168'),
+
+    // Bridge Fees
+    depositFeeRateCommittee: parseFloat(process.env.DEPOSIT_FEE_RATE_COMMITTEE || '0.001'),
+    depositFeeRateZk: parseFloat(process.env.DEPOSIT_FEE_RATE_ZK || '0.0015'),
+    withdrawalFeeRateCommittee: parseFloat(process.env.WITHDRAWAL_FEE_RATE_COMMITTEE || '0.0025'),
+    withdrawalFeeRateZk: parseFloat(process.env.WITHDRAWAL_FEE_RATE_ZK || '0.005'),
+    minFeeLamports: BigInt(process.env.MIN_FEE_LAMPORTS || '1000000'), // 0.001 SOL
 
     // ZK Bridge (Phase 2)
     zkVerifierContract: process.env.DCC_ZK_VERIFIER_CONTRACT || '',

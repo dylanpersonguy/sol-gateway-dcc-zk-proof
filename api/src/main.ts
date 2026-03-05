@@ -23,6 +23,7 @@ import { redeemRouter } from './routes/redeem';
 import { healthRouter } from './routes/health';
 import { statsRouter } from './routes/stats';
 import { adminRouter } from './routes/admin';
+import { feeRouter } from './routes/fees';
 import { errorHandler } from './middleware/error-handler';
 import { requestLogger } from './middleware/request-logger';
 import { createLogger } from './utils/logger';
@@ -80,6 +81,7 @@ async function main(): Promise<void> {
   app.use('/api/v1/deposit', depositLimiter, depositRouter);
   app.use('/api/v1/transfer', transferRouter);
   app.use('/api/v1/redeem', depositLimiter, redeemRouter);
+  app.use('/api/v1/fees', feeRouter);
   app.use('/api/v1/health', healthRouter);
   app.use('/api/v1/stats', statsRouter);
   app.use('/api/v1/admin', adminRouter);
@@ -96,6 +98,8 @@ async function main(): Promise<void> {
     logger.info(`  GET  /api/v1/transfer/:id — Get transfer status`);
     logger.info(`  GET  /api/v1/transfer/:id/stream — SSE real-time updates`);
     logger.info(`  POST /api/v1/redeem       — Generate redeem instruction`);
+    logger.info(`  GET  /api/v1/fees         — Fee schedule`);
+    logger.info(`  GET  /api/v1/fees/quote   — Fee quote calculator`);
     logger.info(`  GET  /api/v1/health       — Bridge health status`);
     logger.info(`  GET  /api/v1/stats        — Bridge statistics`);
     logger.info(`  GET  /api/v1/admin/*      — Admin dashboard (key required)`);
