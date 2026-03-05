@@ -1,4 +1,4 @@
-{-# STDLIB_VERSION 6 #-}
+{-# STDLIB_VERSION 5 #-}
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
@@ -19,7 +19,7 @@
 #   Deposit on Solana → CheckpointProgram commits root →
 #   Prover generates Groth16 proof → This contract verifies & mints
 #
-# RIDE v6 compatible (for groth16Verify support)
+# RIDE v5 compatible (for groth16Verify support)
 
 # ═══════════════════════════════════════════════════════════════
 # CONSTANTS — IMMUTABLE DOMAIN SEPARATION
@@ -30,29 +30,15 @@ let solChainId = 1
 let dccChainId = 2
 let domainSeparator = "DCC_SOL_BRIDGE_V1"
 
-# Native SOL sentinel (same as Solana wrapped SOL mint)
-let nativeSolMint = "So11111111111111111111111111111111111111112"
-
 # Safety controls
 let maxHourlyMint = 100000000000   # 100 SOL equivalent (lamports)
 let maxDailyMint = 1000000000000   # 1000 SOL equivalent
 let maxSingleMint = 50000000000    # 50 SOL equivalent
-let minMintAmount = 10000000       # 0.01 SOL equivalent
+let minMintAmount = 100000          # 0.001 SOL equivalent (1000 lamports)
 let largeTxThreshold = 10000000000 # 10 SOL — triggers delay
 let largeTxDelayBlocks = 100       # ~100 blocks delay for large mints
 let hourlyWindow = 120             # ~120 blocks per hour
 let dailyWindow = 1440             # ~1440 blocks per day
-
-# Groth16 public input count (8 public inputs, each as field elements)
-let PUBLIC_INPUT_COUNT = 8
-
-# Proof format constraints
-let PROOF_MIN_SIZE = 192        # Minimum proof size (BN256 Groth16 ≥ 192 bytes)
-let INPUTS_SIZE = 256           # 8 field elements × 32 bytes each
-let PREIMAGE_SIZE = 181         # Deposit preimage: 17+4+4+32+8+4+32+32+8+8+32
-
-# Checkpoint freshness — reject proofs against stale checkpoints
-let maxCheckpointAge = 10080    # ~7 days in blocks (1 block ≈ 1 min)
 
 # Anomaly detection: auto-pause if hourly minting is abnormal
 let anomalyThresholdPerHour = 200000000000  # 200 SOL (2x normal hourly cap)
@@ -64,36 +50,18 @@ let anomalyThresholdPerHour = 200000000000  # 200 SOL (2x normal hourly cap)
 func keyAdmin() = "admin"
 func keyGuardian() = "guardian"
 func keyPaused() = "paused"
-func keyWsolAssetId() = "wsol_asset_id"
+func keyWsolAssetId() = "sol_asset_id"
 func keyTotalMinted() = "total_minted"
 func keyTotalBurned() = "total_burned"
 func keyGlobalNonce() = "global_nonce"
 
-# Groth16 verifying key (stored as base64 ByteVector)
-func keyVerifyingKey() = "groth16_vk"
-func keyVkSet() = "groth16_vk_set"
+# ZK Verifier contract address (Contract B)
+func keyZkVerifierAddress() = "zk_verifier_address"
 
-# Checkpoint registry
-func keyCheckpointRoot(id: Int) = "checkpoint_" + id.toString() + "_root"
-func keyCheckpointSlot(id: Int) = "checkpoint_" + id.toString() + "_slot"
-func keyCheckpointActive(id: Int) = "checkpoint_" + id.toString() + "_active"
-func keyCheckpointHeight(id: Int) = "checkpoint_" + id.toString() + "_height"
-func keyNextCheckpointId() = "next_checkpoint_id"
-
-# ── Committee-based checkpoint approval (ATK-5 fix) ────────
-# The checkpoint committee is a set of independent validators that
-# must collectively approve each checkpoint before it goes live.
-# Quorum: approvalThreshold out of committeeSize must approve.
+# Committee for Phase 1 minting
 func keyCommitteeMember(addr: String) = "committee_" + addr
 func keyCommitteeSize() = "committee_size"
 func keyApprovalThreshold() = "approval_threshold"
-# Proposal tracking
-func keyProposalRoot(proposalId: Int) = "proposal_" + proposalId.toString() + "_root"
-func keyProposalSlot(proposalId: Int) = "proposal_" + proposalId.toString() + "_slot"
-func keyProposalApprovalCount(proposalId: Int) = "proposal_" + proposalId.toString() + "_approvals"
-func keyProposalApproved(proposalId: Int, addr: String) = "proposal_" + proposalId.toString() + "_approved_" + addr
-func keyProposalFinalized(proposalId: Int) = "proposal_" + proposalId.toString() + "_finalized"
-func keyNextProposalId() = "next_proposal_id"
 
 # Replay protection
 func keyProcessedMessage(messageId: String) = "processed_" + messageId
@@ -145,27 +113,7 @@ func isMessageProcessed(messageId: String) = {
     }
 }
 
-func isVkSet() = {
-    match getBoolean(this, keyVkSet()) {
-        case b: Boolean => b
-        case _ => false
-    }
-}
 
-func getVerifyingKey() = {
-    getBinaryValue(this, keyVerifyingKey())
-}
-
-func isCheckpointActive(id: Int) = {
-    match getBoolean(this, keyCheckpointActive(id)) {
-        case b: Boolean => b
-        case _ => false
-    }
-}
-
-func getCheckpointRoot(id: Int) = {
-    getBinaryValue(this, keyCheckpointRoot(id))
-}
 
 func isCommitteeMember(addr: String) = {
     match getBoolean(this, keyCommitteeMember(addr)) {
@@ -188,50 +136,10 @@ func getApprovalThreshold() = {
     }
 }
 
-# ═══════════════════════════════════════════════════════════════
-# BYTE REVERSAL & FIELD ELEMENT HELPERS
-# ═══════════════════════════════════════════════════════════════
-# FIX: ZK-H2/ATK-2 — Reconstruct 256-bit hashes from two 128-bit
-# BN128 field elements. Each field element is 32-byte big-endian.
-# The 128-bit value occupies the last 16 bytes (bytes 16..31).
-# Original hash bytes are in little-endian order relative to the
-# field element, so we reverse the 16 extracted bytes.
 
-func reverseBytes16(bv: ByteVector) = {
-    take(drop(bv, 15), 1) + take(drop(bv, 14), 1) + take(drop(bv, 13), 1) +
-    take(drop(bv, 12), 1) + take(drop(bv, 11), 1) + take(drop(bv, 10), 1) +
-    take(drop(bv, 9), 1) + take(drop(bv, 8), 1) + take(drop(bv, 7), 1) +
-    take(drop(bv, 6), 1) + take(drop(bv, 5), 1) + take(drop(bv, 4), 1) +
-    take(drop(bv, 3), 1) + take(drop(bv, 2), 1) + take(drop(bv, 1), 1) +
-    take(bv, 1)
-}
 
-# Reconstruct a 32-byte hash from two 128-bit field elements (each 32 bytes BE)
-func reconstruct256(feLo: ByteVector, feHi: ByteVector) = {
-    reverseBytes16(drop(feLo, 16)) + reverseBytes16(drop(feHi, 16))
-}
-
-# Extract a 64-bit integer from a 32-byte BE field element.
-# FIX: ATK-2 — The integer value is in the last 8 bytes of the
-# big-endian encoding. toInt reads 8 bytes at the given offset as BE i64.
-func fieldElementToInt(fe: ByteVector) = {
-    toInt(fe, 24)
-}
-
-# Extract a 32-bit integer from a 32-byte BE field element.
-func fieldElementToInt32(fe: ByteVector) = {
-    toInt(fe, 24)
-}
-
-# ═══════════════════════════════════════════════════════════════
-# LITTLE-ENDIAN BYTE ENCODING HELPERS
-# ═══════════════════════════════════════════════════════════════
-# RIDE's toBytes(Int) produces 8-byte BIG-endian. The canonical
-# bridge encoding uses LITTLE-endian with specific widths (4B or 8B).
-# These helpers manually encode integers in LE byte order.
-
+# Little-endian byte encoding (needed for burn message_id)
 func intToLE4(v: Int) = {
-    # Encode a u32 as 4 bytes little-endian
     let b0 = v % 256
     let b1 = (v / 256) % 256
     let b2 = (v / 65536) % 256
@@ -240,7 +148,6 @@ func intToLE4(v: Int) = {
 }
 
 func intToLE8(v: Int) = {
-    # Encode a u64 as 8 bytes little-endian
     let b0 = v % 256
     let b1 = (v / 256) % 256
     let b2 = (v / 65536) % 256
@@ -251,60 +158,6 @@ func intToLE8(v: Int) = {
     let b7 = (v / 72057594037927936) % 256
     toBytes(b0).drop(7) + toBytes(b1).drop(7) + toBytes(b2).drop(7) + toBytes(b3).drop(7) +
     toBytes(b4).drop(7) + toBytes(b5).drop(7) + toBytes(b6).drop(7) + toBytes(b7).drop(7)
-}
-
-# Compute message_id via keccak256 (RIDE built-in)
-# message_id = keccak256(
-#   "DCC_SOL_BRIDGE_V1"(17B) || src_chain(4B LE) || dst_chain(4B LE) ||
-#   src_program(32B) || slot(8B LE) || event_index(4B LE) ||
-#   sender(32B) || recipient(32B) || amount(8B LE) || nonce(8B LE) || asset_id(32B)
-# )
-# Total preimage: 181 bytes (must match Rust, TypeScript, and Circom exactly)
-func computeMessageId(
-    srcChainId: Int,
-    dstChainId: Int,
-    srcProgramId: ByteVector,
-    slot: Int,
-    eventIndex: Int,
-    sender: ByteVector,
-    recipient: ByteVector,
-    amount: Int,
-    nonce: Int,
-    assetId: ByteVector
-) = {
-    # Validate fixed-length fields
-    if (size(srcProgramId) != 32) then throw("srcProgramId must be 32 bytes")
-    else if (size(sender) != 32) then throw("sender must be 32 bytes")
-    else if (size(recipient) != 32) then throw("recipient must be 32 bytes")
-    else if (size(assetId) != 32) then throw("assetId must be 32 bytes")
-    else {
-        let domainBytes = toBytes(domainSeparator)
-        # FIX: ZK-M4 — Runtime assertion that toBytes(String) returns raw UTF-8
-        # without a length prefix. If RIDE behavior changes, this catches it.
-        if (size(domainBytes) != 17) then throw("Domain separator encoding error: expected 17 bytes, got " + size(domainBytes).toString())
-        else {
-        let preimage = domainBytes +                       # 17 bytes (UTF-8, verified no length prefix)
-            intToLE4(srcChainId) +                  # 4 bytes LE
-            intToLE4(dstChainId) +                  # 4 bytes LE
-            srcProgramId +                          # 32 bytes
-            intToLE8(slot) +                        # 8 bytes LE
-            intToLE4(eventIndex) +                  # 4 bytes LE
-            sender +                                # 32 bytes
-            recipient +                             # 32 bytes
-            intToLE8(amount) +                      # 8 bytes LE
-            intToLE8(nonce) +                       # 8 bytes LE
-            assetId                                 # 32 bytes
-        # Total: 17 + 4 + 4 + 32 + 8 + 4 + 32 + 32 + 8 + 8 + 32 = 181 bytes
-        keccak256(preimage)
-        }
-    }
-}
-
-# Compute leaf hash for Merkle tree: Keccak256(0x00 || message_id)
-# RFC 6962 §2.1 domain separation for Merkle leaves vs internal nodes.
-func computeLeafHash(messageId: ByteVector) = {
-    if (size(messageId) != 32) then throw("messageId must be 32 bytes")
-    else keccak256(toBytes(0).drop(7) + messageId)
 }
 
 # Check hourly rate limit
@@ -371,417 +224,129 @@ func initialize(guardian: String) = {
             IntegerEntry(keyTotalMinted(), 0),
             IntegerEntry(keyTotalBurned(), 0),
             IntegerEntry(keyGlobalNonce(), 0),
-            IntegerEntry(keyNextCheckpointId(), 0),
             IntegerEntry(keyHourlyMinted(), 0),
             IntegerEntry(keyHourlyResetHeight(), height),
             IntegerEntry(keyDailyMinted(), 0),
-            IntegerEntry(keyDailyResetHeight(), height),
-            BooleanEntry(keyVkSet(), false)
+            IntegerEntry(keyDailyResetHeight(), height)
         ]
     }
 }
 
 # ═══════════════════════════════════════════════════════════════
-# SET VERIFYING KEY (one-time, immutable)
+# COMMITTEE MANAGEMENT (Phase 1 — Signature-Based Minting)
 # ═══════════════════════════════════════════════════════════════
 
 @Callable(i)
-func setVerifyingKey(vk: ByteVector, expectedHash: ByteVector) = {
+func initializeCommittee(pk1: String, pk2: String, pk3: String, threshold: Int) = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
-    else if (isVkSet()) then throw("Verifying key already set — immutable")
-    else if (size(vk) == 0) then throw("Empty verifying key")
-    else if (size(expectedHash) != 32) then throw("Expected hash must be 32 bytes")
-    else {
-        # Verify the VK matches the expected hash to prevent supply-chain tampering.
-        # The deployer computes keccak256(vk) off-chain and passes it as expectedHash.
-        let actualHash = keccak256(vk)
-        if (actualHash != expectedHash) then throw("VK hash mismatch — possible tampering")
-        else {
-            [
-                BinaryEntry(keyVerifyingKey(), vk),
-                BooleanEntry(keyVkSet(), true),
-                BinaryEntry("groth16_vk_hash", actualHash)
-            ]
-        }
-    }
-}
-
-# ═══════════════════════════════════════════════════════════════
-# CHECKPOINT COMMITTEE MANAGEMENT (ATK-5 Fix)
-# ═══════════════════════════════════════════════════════════════
-#
-# Admin initializes a committee of N independent validators.
-# Checkpoints require T-of-N approvals before activation.
-# This prevents a single compromised key from injecting
-# a malicious checkpoint root.
-
-@Callable(i)
-func initializeCommittee(members: List[String], threshold: Int) = {
-    if (!isAdmin(i.caller)) then throw("Unauthorized")
-    else if (size(members) < 3) then throw("Committee must have at least 3 members")
     else if (threshold < 2) then throw("Threshold must be at least 2")
-    else if (threshold > size(members)) then throw("Threshold cannot exceed committee size")
-    else if (getCommitteeSize() > 0) then throw("Committee already initialized — use replaceCommittee")
+    else if (threshold > 3) then throw("Threshold cannot exceed committee size")
     else {
-        # Register each committee member
-        func addMember(acc: List[BooleanEntry], addr: String) = {
-            acc :+ BooleanEntry(keyCommitteeMember(addr), true)
-        }
-        let memberEntries = FOLD<10>(members, [], addMember)
-        memberEntries ++ [
-            IntegerEntry(keyCommitteeSize(), size(members)),
-            IntegerEntry(keyApprovalThreshold(), threshold),
-            IntegerEntry(keyNextProposalId(), 0)
-        ]
-    }
-}
-
-# Replace committee (admin only, for key rotation)
-@Callable(i)
-func replaceCommittee(newMembers: List[String], oldMembers: List[String], newThreshold: Int) = {
-    if (!isAdmin(i.caller)) then throw("Unauthorized")
-    else if (size(newMembers) < 3) then throw("Committee must have at least 3 members")
-    else if (newThreshold < 2) then throw("Threshold must be at least 2")
-    else if (newThreshold > size(newMembers)) then throw("Threshold cannot exceed committee size")
-    else {
-        # Remove old members
-        func removeMember(acc: List[DeleteEntry], addr: String) = {
-            acc :+ DeleteEntry(keyCommitteeMember(addr))
-        }
-        let removeEntries = FOLD<10>(oldMembers, [], removeMember)
-        # Add new members
-        func addMember(acc: List[BooleanEntry], addr: String) = {
-            acc :+ BooleanEntry(keyCommitteeMember(addr), true)
-        }
-        let addEntries = FOLD<10>(newMembers, [], addMember)
-        removeEntries ++ addEntries ++ [
-            IntegerEntry(keyCommitteeSize(), size(newMembers)),
-            IntegerEntry(keyApprovalThreshold(), newThreshold)
+        [
+            BooleanEntry(keyCommitteeMember(pk1), true),
+            BooleanEntry(keyCommitteeMember(pk2), true),
+            BooleanEntry(keyCommitteeMember(pk3), true),
+            IntegerEntry(keyCommitteeSize(), 3),
+            IntegerEntry(keyApprovalThreshold(), threshold)
         ]
     }
 }
 
 # ═══════════════════════════════════════════════════════════════
-# REGISTER CHECKPOINT — Committee-based (ATK-5 Fix)
+# COMMITTEE MINT — Signature-Based Minting (Phase 1)
 # ═══════════════════════════════════════════════════════════════
 #
-# Phase 1 (Legacy/Fallback): Admin can register if no committee exists
-# Phase 2 (Decentralized): Committee members propose + approve checkpoints
+# Allows minting when T-of-N committee members provide valid Ed25519
+# signatures over the canonical mint message. This is the Phase 1
+# bridge path; Phase 2 adds ZK proof verification via verifyAndMint.
 #
-# Protocol:
-#   1. Any committee member calls proposeCheckpoint(slot, root)
-#   2. Other members call approveCheckpoint(proposalId)
-#   3. Once threshold is met, checkpoint is auto-activated
-#
-# This ensures no single point of failure: at least T independent
-# validators must agree on the Solana checkpoint root.
+# Message format: transferId + "|" + recipient + "|" + amount + "|" + solSlot
 
 @Callable(i)
-func proposeCheckpoint(
-    slot: Int,
-    commitmentRoot: ByteVector
+func committeeMint(
+    transferId: String,
+    recipient: String,
+    amount: Int,
+    solSlot: Int,
+    signatures: List[ByteVector],
+    pubkeys: List[ByteVector]
 ) = {
     if (isPaused()) then throw("Bridge is paused")
-    else if (size(commitmentRoot) != 32) then throw("Invalid root length")
-    else if (commitmentRoot == base58'11111111111111111111111111111111') then throw("Zero root rejected")
+    else if (size(signatures) != size(pubkeys)) then throw("Signatures/pubkeys length mismatch")
     else {
-        let committeeSize = getCommitteeSize()
-        let callerAddr = i.caller.toString()
-        if (committeeSize == 0) then throw("Committee not initialized — use registerCheckpoint (admin)")
-        else if (!isCommitteeMember(callerAddr)) then throw("Not a committee member")
+        let threshold = getApprovalThreshold()
+        if (threshold <= 0) then throw("Committee not initialized")
+        else if (size(signatures) < threshold) then throw("Not enough signatures: " + size(signatures).toString() + " < " + threshold.toString())
+        else if (isMessageProcessed(transferId)) then throw("Already processed: " + transferId)
+        else if (amount < minMintAmount) then throw("Amount below minimum")
+        else if (amount > maxSingleMint) then throw("Amount exceeds single mint limit")
         else {
-            let nextProposal = match getInteger(this, keyNextProposalId()) {
-                case n: Int => n
-                case _ => 0
-            }
-            [
-                BinaryEntry(keyProposalRoot(nextProposal), commitmentRoot),
-                IntegerEntry(keyProposalSlot(nextProposal), slot),
-                IntegerEntry(keyProposalApprovalCount(nextProposal), 1),
-                BooleanEntry(keyProposalApproved(nextProposal, callerAddr), true),
-                BooleanEntry(keyProposalFinalized(nextProposal), false),
-                IntegerEntry(keyNextProposalId(), nextProposal + 1)
-            ]
-        }
-    }
-}
+            # Construct canonical message for signature verification
+            let message = toBytes(transferId + "|" + recipient + "|" + amount.toString() + "|" + solSlot.toString())
 
-@Callable(i)
-func approveCheckpoint(proposalId: Int) = {
-    if (isPaused()) then throw("Bridge is paused")
-    else {
-        let callerAddr = i.caller.toString()
-        if (!isCommitteeMember(callerAddr)) then throw("Not a committee member")
-        else {
-            let isFinalized = match getBoolean(this, keyProposalFinalized(proposalId)) {
-                case b: Boolean => b
-                case _ => throw("Proposal does not exist: " + proposalId.toString())
-            }
-            if (isFinalized) then throw("Proposal already finalized")
-            else {
-                let alreadyApproved = match getBoolean(this, keyProposalApproved(proposalId, callerAddr)) {
-                    case b: Boolean => b
-                    case _ => false
-                }
-                if (alreadyApproved) then throw("Already approved by " + callerAddr)
+            # Verify committee signatures using index-based fold
+            let indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+            func checkOneSig(acc: Int, idx: Int) = {
+                if (idx >= size(pubkeys)) then acc
                 else {
-                    let currentApprovals = getIntegerValue(this, keyProposalApprovalCount(proposalId))
-                    let newApprovals = currentApprovals + 1
-                    let threshold = getApprovalThreshold()
-                    
-                    if (newApprovals >= threshold) then {
-                        # Threshold met — activate the checkpoint
-                        let commitmentRoot = getBinaryValue(this, keyProposalRoot(proposalId))
-                        let slot = getIntegerValue(this, keyProposalSlot(proposalId))
-                        let nextId = match getInteger(this, keyNextCheckpointId()) {
-                            case n: Int => n
-                            case _ => 0
-                        }
-                        [
-                            IntegerEntry(keyProposalApprovalCount(proposalId), newApprovals),
-                            BooleanEntry(keyProposalApproved(proposalId, callerAddr), true),
-                            BooleanEntry(keyProposalFinalized(proposalId), true),
-                            # Activate the checkpoint
-                            BinaryEntry(keyCheckpointRoot(nextId), commitmentRoot),
-                            IntegerEntry(keyCheckpointSlot(nextId), slot),
-                            BooleanEntry(keyCheckpointActive(nextId), true),
-                            IntegerEntry(keyCheckpointHeight(nextId), height),
-                            IntegerEntry(keyNextCheckpointId(), nextId + 1)
+                    let pk = pubkeys[idx]
+                    let sig = signatures[idx]
+                    let pkStr = toBase58String(pk)
+                    let isMember = isCommitteeMember(pkStr)
+                    if (isMember && sigVerify(message, sig, pk)) then acc + 1
+                    else acc
+                }
+            }
+            let validCount = FOLD<10>(indices, 0, checkOneSig)
+
+            if (validCount < threshold) then
+                throw("Insufficient valid committee signatures: " + validCount.toString() + " < " + threshold.toString())
+            else {
+                # Rate limits
+                let (newHourlyMinted, newHourlyResetHeight) = checkHourlyLimit(amount)
+                let (newDailyMinted, newDailyResetHeight) = checkDailyLimit(amount)
+                let shouldAutoPause = (newHourlyMinted > anomalyThresholdPerHour)
+
+                let wsolAssetId = getStringValue(this, keyWsolAssetId())
+                let totalMinted = getIntegerValue(this, keyTotalMinted())
+                let globalNonce = getIntegerValue(this, keyGlobalNonce())
+
+                # Decimal conversion: Solana SOL = 9 decimals, DCC wSOL = 8 decimals
+                let mintAmount = amount / 10
+                if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
+                else {
+                    let recipientAddr = addressFromStringValue(recipient)
+
+                    let baseEntries = [
+                        BooleanEntry(keyProcessedMessage(transferId), true),
+                        IntegerEntry(keyProcessedAt(transferId), lastBlock.timestamp),
+                        IntegerEntry(keyMintedAmount(transferId), mintAmount),
+                        IntegerEntry(keyHourlyMinted(), newHourlyMinted),
+                        IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
+                        IntegerEntry(keyDailyMinted(), newDailyMinted),
+                        IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
+                    ]
+
+                    let pauseEntries = if (shouldAutoPause) then [BooleanEntry(keyPaused(), true)] else []
+
+                    if (amount >= largeTxThreshold) then {
+                        baseEntries ++ pauseEntries ++ [
+                            BooleanEntry(keyPendingLargeTx(transferId), true),
+                            IntegerEntry(keyPendingLargeTxHeight(transferId), height),
+                            StringEntry(keyPendingRecipient(transferId), recipient),
+                            IntegerEntry(keyPendingAmount(transferId), mintAmount)
                         ]
                     }
                     else {
-                        [
-                            IntegerEntry(keyProposalApprovalCount(proposalId), newApprovals),
-                            BooleanEntry(keyProposalApproved(proposalId, callerAddr), true)
+                        baseEntries ++ pauseEntries ++ [
+                            Reissue(fromBase58String(wsolAssetId).value(), mintAmount, true),
+                            ScriptTransfer(recipientAddr, mintAmount, fromBase58String(wsolAssetId).value()),
+                            IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                            IntegerEntry(keyGlobalNonce(), globalNonce + 1)
                         ]
                     }
                 }
             }
-        }
-    }
-}
-
-# Legacy admin-only registerCheckpoint (only works when committee is NOT initialized)
-@Callable(i)
-func registerCheckpoint(
-    checkpointId: Int,
-    slot: Int,
-    commitmentRoot: ByteVector
-) = {
-    if (!isAdmin(i.caller)) then throw("Unauthorized")
-    else if (isPaused()) then throw("Bridge is paused")
-    else if (getCommitteeSize() > 0) then throw("Committee is active — use proposeCheckpoint + approveCheckpoint")
-    else if (size(commitmentRoot) != 32) then throw("Invalid root length")
-    else if (commitmentRoot == base58'11111111111111111111111111111111') then throw("Zero root rejected")
-    else {
-        let nextId = match getInteger(this, keyNextCheckpointId()) {
-            case n: Int => n
-            case _ => 0
-        }
-        if (checkpointId != nextId) then throw("Checkpoint ID mismatch: expected " + nextId.toString())
-        else {
-            [
-                BinaryEntry(keyCheckpointRoot(checkpointId), commitmentRoot),
-                IntegerEntry(keyCheckpointSlot(checkpointId), slot),
-                BooleanEntry(keyCheckpointActive(checkpointId), true),
-                IntegerEntry(keyCheckpointHeight(checkpointId), height),
-                IntegerEntry(keyNextCheckpointId(), nextId + 1)
-            ]
-        }
-    }
-}
-
-# Checkpoint expiration: auto-expire after ~24 hours of blocks
-let checkpointExpiryBlocks = 1440  # ~1440 blocks ≈ 24 hours
-
-# Deactivate an expired checkpoint (admin/guardian or anyone for auto-expired)
-@Callable(i)
-func deactivateCheckpoint(checkpointId: Int) = {
-    if (!isCheckpointActive(checkpointId)) then throw("Checkpoint not active")
-    else {
-        let registeredHeight = getIntegerValue(this, keyCheckpointHeight(checkpointId))
-        let isExpired = (height - registeredHeight) >= checkpointExpiryBlocks
-        if (!isAdmin(i.caller) && !isGuardian(i.caller) && !isExpired) then
-            throw("Unauthorized: checkpoint not yet expired")
-        else {
-            [BooleanEntry(keyCheckpointActive(checkpointId), false)]
-        }
-    }
-}
-
-# ═══════════════════════════════════════════════════════════════
-# VERIFY & MINT — Core ZK bridge function (v2)
-# ═══════════════════════════════════════════════════════════════
-#
-# Accepts a Groth16 proof and mints wSOL if it verifies.
-# NO multisig. The ZK proof IS the authority.
-#
-# STRATEGY A: Ride recomputes message_id from caller-provided deposit fields
-# and cross-validates against the ZK proof's public inputs.
-# This provides defense-in-depth: even if the proving system has a bug,
-# RIDE independently verifies the message hash.
-#
-# PUBLIC INPUTS (8 field elements, each 32 bytes BE):
-#   [0] checkpoint_root_lo  (128-bit, lower half of root hash)
-#   [1] checkpoint_root_hi  (128-bit, upper half of root hash)
-#   [2] message_id_lo       (128-bit, lower half of message_id)
-#   [3] message_id_hi       (128-bit, upper half of message_id)
-#   [4] amount              (64-bit transfer amount)
-#   [5] recipient_lo        (128-bit, lower half of recipient pubkey)
-#   [6] recipient_hi        (128-bit, upper half of recipient pubkey)
-#   [7] version             (32-bit protocol version)
-#
-# RECIPIENT ENCODING:
-#   recipient is a 32-byte DCC Curve25519 public key (NOT a 26-byte address).
-#   RIDE derives the DCC Address via addressFromPublicKey(pubkey).
-#   No base58 inside hashes.
-
-@Callable(i)
-func verifyAndMint(
-    proof: ByteVector,
-    inputs: ByteVector,
-    checkpointId: Int,
-    srcChainId: Int,
-    dstChainId: Int,
-    srcProgramId: ByteVector,
-    slot: Int,
-    eventIndex: Int,
-    sender: ByteVector,
-    recipient: ByteVector,
-    amount: Int,
-    nonce: Int,
-    assetId: ByteVector
-) = {
-    # ═══ PRE-FLIGHT CHECKS ═══
-    if (isPaused()) then throw("Bridge is paused")
-    else if (!isVkSet()) then throw("Verifying key not set")
-    else if (size(proof) < PROOF_MIN_SIZE) then throw("Proof too short: " + size(proof).toString() + " bytes")
-    else if (size(inputs) != INPUTS_SIZE) then throw("Invalid inputs length: expected 256 bytes (8 × 32), got " + size(inputs).toString())
-    else if (!isCheckpointActive(checkpointId)) then throw("Checkpoint not active: " + checkpointId.toString())
-    else {
-        # ═══ CHECKPOINT FRESHNESS ═══
-        let cpHeight = getIntegerValue(this, keyCheckpointHeight(checkpointId))
-        if (height - cpHeight > maxCheckpointAge) then
-            throw("Checkpoint too old: " + (height - cpHeight).toString() + " blocks, max " + maxCheckpointAge.toString())
-        else {
-
-        # ═══ STEP 1: RIDE RECOMPUTES MESSAGE_ID (Strategy A) ═══
-        # Defense-in-depth: caller provides all deposit fields,
-        # RIDE independently computes keccak256(canonical_preimage).
-        let localMessageId = computeMessageId(
-            srcChainId, dstChainId, srcProgramId,
-            slot, eventIndex, sender, recipient,
-            amount, nonce, assetId
-        )
-        let messageIdStr = toBase58String(localMessageId)
-
-        # Replay protection — BEFORE any minting
-        if (isMessageProcessed(messageIdStr)) then throw("Message already processed: " + messageIdStr)
-        else {
-
-        # ═══ STEP 2: EXTRACT VALUES FROM ZK PROOF PUBLIC INPUTS ═══
-        let feRootLo = take(inputs, 32)
-        let feRootHi = take(drop(inputs, 32), 32)
-        let feMsgIdLo = take(drop(inputs, 64), 32)
-        let feMsgIdHi = take(drop(inputs, 96), 32)
-        let feAmount = take(drop(inputs, 128), 32)
-        let feRecipLo = take(drop(inputs, 160), 32)
-        let feRecipHi = take(drop(inputs, 192), 32)
-        let feVersion = take(drop(inputs, 224), 32)
-
-        let proofRoot = reconstruct256(feRootLo, feRootHi)
-        let proofMessageId = reconstruct256(feMsgIdLo, feMsgIdHi)
-        let proofAmount = fieldElementToInt(feAmount)
-        let proofRecipient = reconstruct256(feRecipLo, feRecipHi)
-        let proofVersion = fieldElementToInt32(feVersion)
-
-        # ═══ STEP 3: CROSS-VALIDATE LOCAL vs PROOF ═══
-        # If these disagree, either the caller lied about fields or the proof
-        # was generated for different data — reject either way.
-        if (localMessageId != proofMessageId) then
-            throw("CRITICAL: local message_id disagrees with proof. Encoding mismatch or tampered fields.")
-        else if (proofAmount != amount) then
-            throw("Amount mismatch: proof=" + proofAmount.toString() + " caller=" + amount.toString())
-        else if (proofRecipient != recipient) then
-            throw("Recipient mismatch between proof and caller-provided value")
-        else {
-
-        # ═══ STEP 4: DOMAIN VALIDATION ═══
-        let storedRoot = getCheckpointRoot(checkpointId)
-        if (proofRoot != storedRoot) then throw("Checkpoint root mismatch")
-        else if (amount < minMintAmount) then throw("Amount below minimum: " + amount.toString())
-        else if (amount > maxSingleMint) then throw("Amount exceeds single mint limit: " + amount.toString())
-        else if (proofVersion != bridgeVersion) then
-            throw("Version mismatch: expected " + bridgeVersion.toString() + ", got " + proofVersion.toString())
-        else if (srcChainId != solChainId) then throw("Invalid source chain: expected " + solChainId.toString())
-        else if (dstChainId != dccChainId) then throw("Invalid destination chain: expected " + dccChainId.toString())
-        else {
-
-        # ═══ STEP 5: GROTH16 VERIFICATION — THE SECURITY ROOT ═══
-        let vk = getVerifyingKey()
-        if (!groth16Verify_8inputs(vk, proof, inputs)) then
-            throw("ZK PROOF VERIFICATION FAILED — mint rejected")
-        else {
-
-        # ═══ STEP 6: DERIVE RECIPIENT DCC ADDRESS ═══
-        # recipient is a 32-byte DCC public key; derive Address from it.
-        # This replaces the old addressFromStringValue which was incorrect
-        # for 32-byte public keys.
-        let recipientAddr = addressFromPublicKey(recipient)
-
-        # ═══ STEP 7: RATE LIMITS + ANOMALY DETECTION ═══
-        let (newHourlyMinted, newHourlyResetHeight) = checkHourlyLimit(amount)
-        let (newDailyMinted, newDailyResetHeight) = checkDailyLimit(amount)
-
-        # Auto-pause if hourly volume is anomalous (>2x normal cap)
-        let shouldAutoPause = (newHourlyMinted > anomalyThresholdPerHour)
-
-        let wsolAssetId = getStringValue(this, keyWsolAssetId())
-        let totalMinted = getIntegerValue(this, keyTotalMinted())
-        let globalNonce = getIntegerValue(this, keyGlobalNonce())
-
-        # Decimal conversion: Solana SOL = 9 decimals, DCC wSOL = 8 decimals
-        let mintAmount = amount / 10
-        if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
-        else {
-            # Base entries: replay protection + full audit trail
-            let baseEntries = [
-                BooleanEntry(keyProcessedMessage(messageIdStr), true),
-                IntegerEntry(keyProcessedAt(messageIdStr), lastBlock.timestamp),
-                IntegerEntry(keyMintedAmount(messageIdStr), mintAmount),
-                IntegerEntry(keyHourlyMinted(), newHourlyMinted),
-                IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
-                IntegerEntry(keyDailyMinted(), newDailyMinted),
-                IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
-            ]
-
-            # Anomaly auto-pause entry
-            let pauseEntries = if (shouldAutoPause) then [BooleanEntry(keyPaused(), true)] else []
-
-            if (amount >= largeTxThreshold) then {
-                # Large transaction: queue for delayed execution
-                baseEntries ++ pauseEntries ++ [
-                    BooleanEntry(keyPendingLargeTx(messageIdStr), true),
-                    IntegerEntry(keyPendingLargeTxHeight(messageIdStr), height),
-                    StringEntry(keyPendingRecipient(messageIdStr), recipientAddr.toString()),
-                    IntegerEntry(keyPendingAmount(messageIdStr), mintAmount)
-                ]
-            }
-            else {
-                # Immediate mint
-                baseEntries ++ pauseEntries ++ [
-                    Reissue(fromBase58String(wsolAssetId).value(), mintAmount, true),
-                    ScriptTransfer(recipientAddr, mintAmount, fromBase58String(wsolAssetId).value()),
-                    IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
-                    IntegerEntry(keyGlobalNonce(), globalNonce + 1)
-                ]
-            }
-        }
-
-        }
-        }
-        }
-        }
         }
     }
 }
@@ -975,6 +540,90 @@ func updateGuardian(newGuardian: String) = {
     }
 }
 
+# Set ZK Verifier contract address (admin only)
+# This is the address of Contract B which is authorized to call zkMintAuthorized
+@Callable(i)
+func setZkVerifier(verifierAddress: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [StringEntry(keyZkVerifierAddress(), verifierAddress)]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# ZK MINT AUTHORIZED — Cross-Contract Mint (Phase 2)
+# ═══════════════════════════════════════════════════════════════
+#
+# ONLY the ZK Verifier contract (Contract B) can call this function.
+# i.caller is set by the DCC runtime and cannot be spoofed. This ensures
+# that a valid Groth16 proof was verified before any minting occurs.
+#
+# The ZK Verifier contract calls:
+#   invoke(bridgeCoreAddr, "zkMintAuthorized", [recipient, amount, messageId, solSlot], [])
+# after successfully verifying a Groth16 proof.
+
+@Callable(i)
+func zkMintAuthorized(recipient: String, amount: Int, messageId: String, solSlot: Int) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else {
+        let zkVerifier = match getString(this, keyZkVerifierAddress()) {
+            case s: String => s
+            case _ => throw("ZK verifier not configured")
+        }
+        if (i.caller.toString() != zkVerifier) then
+            throw("Unauthorized: only ZK verifier contract can call zkMintAuthorized")
+        else if (isMessageProcessed(messageId)) then throw("Already processed: " + messageId)
+        else if (amount < minMintAmount) then throw("Amount below minimum")
+        else if (amount > maxSingleMint) then throw("Amount exceeds single mint limit")
+        else {
+            # Rate limits
+            let (newHourlyMinted, newHourlyResetHeight) = checkHourlyLimit(amount)
+            let (newDailyMinted, newDailyResetHeight) = checkDailyLimit(amount)
+            let shouldAutoPause = (newHourlyMinted > anomalyThresholdPerHour)
+
+            let wsolAssetId = getStringValue(this, keyWsolAssetId())
+            let totalMinted = getIntegerValue(this, keyTotalMinted())
+            let globalNonce = getIntegerValue(this, keyGlobalNonce())
+
+            # Decimal conversion: Solana SOL = 9 decimals, DCC wSOL = 8 decimals
+            let mintAmount = amount / 10
+            if (mintAmount <= 0) then throw("Amount too small after decimal conversion")
+            else {
+                let recipientAddr = addressFromStringValue(recipient)
+
+                let baseEntries = [
+                    BooleanEntry(keyProcessedMessage(messageId), true),
+                    IntegerEntry(keyProcessedAt(messageId), lastBlock.timestamp),
+                    IntegerEntry(keyMintedAmount(messageId), mintAmount),
+                    IntegerEntry(keyHourlyMinted(), newHourlyMinted),
+                    IntegerEntry(keyHourlyResetHeight(), newHourlyResetHeight),
+                    IntegerEntry(keyDailyMinted(), newDailyMinted),
+                    IntegerEntry(keyDailyResetHeight(), newDailyResetHeight)
+                ]
+
+                let pauseEntries = if (shouldAutoPause) then [BooleanEntry(keyPaused(), true)] else []
+
+                if (amount >= largeTxThreshold) then {
+                    baseEntries ++ pauseEntries ++ [
+                        BooleanEntry(keyPendingLargeTx(messageId), true),
+                        IntegerEntry(keyPendingLargeTxHeight(messageId), height),
+                        StringEntry(keyPendingRecipient(messageId), recipient),
+                        IntegerEntry(keyPendingAmount(messageId), mintAmount)
+                    ]
+                }
+                else {
+                    baseEntries ++ pauseEntries ++ [
+                        Reissue(fromBase58String(wsolAssetId).value(), mintAmount, true),
+                        ScriptTransfer(recipientAddr, mintAmount, fromBase58String(wsolAssetId).value()),
+                        IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                        IntegerEntry(keyGlobalNonce(), globalNonce + 1)
+                    ]
+                }
+            }
+        }
+    }
+}
+
 # ═══════════════════════════════════════════════════════════════
 # READ-ONLY VIEWS
 # ═══════════════════════════════════════════════════════════════
@@ -985,15 +634,14 @@ func getStats() = {
     let totalBurned = getIntegerValue(this, keyTotalBurned())
     let outstanding = totalMinted - totalBurned
     let paused = isPaused()
-    let vkSet = isVkSet()
-    let nextCp = match getInteger(this, keyNextCheckpointId()) {
-        case n: Int => n
-        case _ => 0
+    let zkVerifier = match getString(this, keyZkVerifierAddress()) {
+        case s: String => s
+        case _ => "not set"
     }
     
     (
         [],
-        (totalMinted, totalBurned, outstanding, paused, vkSet, nextCp)
+        (totalMinted, totalBurned, outstanding, paused, zkVerifier)
     )
 }
 

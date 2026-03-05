@@ -16,12 +16,16 @@ import { createLogger } from '../utils/logger';
 
 export interface SolanaDepositEvent {
   transferId: string;
+  messageId: string;
   sender: string;
   recipientDcc: string;
   amount: bigint;
   nonce: bigint;
   slot: number;
+  eventIndex: number;
   timestamp: number;
+  srcChainId: number;
+  dstChainId: number;
   chainId: number;
   signature: string;
   confirmations: number;
@@ -45,6 +49,8 @@ export class SolanaWatcher extends EventEmitter {
   private lastProcessedSlot: number = 0;
   private pendingEvents: Map<string, SolanaDepositEvent> = new Map();
   private subscriptionId: number | null = null;
+  private lastSeenSignature: string | null = null;
+  private usePolling: boolean = false;
 
   constructor(config: SolanaWatcherConfig) {
     super();
@@ -64,8 +70,33 @@ export class SolanaWatcher extends EventEmitter {
       requiredConfirmations: this.config.requiredConfirmations,
     });
 
-    // Subscribe to program logs for real-time event detection
-    await this.subscribeToLogs();
+    // Helius and many RPC providers don't support logsSubscribe with mentions.
+    // Use polling by default — it's more reliable and works with all providers.
+    // Only attempt WebSocket if explicitly configured with a non-Helius WS URL.
+    const wsUrl = this.config.wsUrl || '';
+    const forceWs = process.env.SOLANA_USE_WEBSOCKET === 'true';
+    const isHelius = wsUrl.includes('helius');
+
+    if (forceWs && !isHelius) {
+      try {
+        await this.subscribeToLogs();
+        this.logger.info('Using WebSocket for deposit detection');
+      } catch (err) {
+        this.logger.warn('WebSocket logsSubscribe failed, falling back to polling', { error: err });
+        this.usePolling = true;
+      }
+    } else {
+      this.usePolling = true;
+      if (isHelius) {
+        this.logger.info('Helius RPC detected — using polling mode (logsSubscribe not supported)');
+      } else {
+        this.logger.info('Using polling mode for deposit detection');
+      }
+    }
+
+    if (this.usePolling) {
+      this.runPollingLoop();
+    }
 
     // Start finality confirmation loop
     this.runFinalityLoop();
@@ -83,19 +114,145 @@ export class SolanaWatcher extends EventEmitter {
   private async subscribeToLogs(): Promise<void> {
     const filter: LogsFilter = { mentions: [this.programId.toBase58()] };
 
-    this.subscriptionId = this.connection.onLogs(
-      filter,
-      async (logs, ctx) => {
-        try {
-          await this.processLogs(logs, ctx);
-        } catch (err) {
-          this.logger.error('Error processing logs', { error: err });
+    // Wrap in a promise so we can detect early WS errors
+    return new Promise<void>((resolve, reject) => {
+      let resolved = false;
+
+      // Listen for WS errors that fire before the subscription succeeds
+      const errorHandler = (err: any) => {
+        if (!resolved) {
+          resolved = true;
+          this.usePolling = true;
+          this.logger.warn('WebSocket error during logsSubscribe — will use polling', { error: err?.message || err });
+          resolve(); // Don't reject; we handle this gracefully via usePolling flag
         }
-      },
+      };
+
+      try {
+        this.subscriptionId = this.connection.onLogs(
+          filter,
+          async (logs, ctx) => {
+            // First successful callback proves WS works
+            if (!resolved) {
+              resolved = true;
+            }
+            try {
+              await this.processLogs(logs, ctx);
+            } catch (err) {
+              this.logger.error('Error processing logs', { error: err });
+            }
+          },
+          'confirmed'
+        );
+
+        this.logger.info('Subscribed to program logs (WebSocket)');
+
+        // Give the WS a brief window to fail, then resolve
+        setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            resolve();
+          }
+        }, 1500);
+      } catch (err) {
+        if (!resolved) {
+          resolved = true;
+          this.usePolling = true;
+          this.logger.warn('logsSubscribe threw synchronously — will use polling', { error: err });
+          resolve();
+        }
+      }
+    });
+  }
+
+  /**
+   * Poll for new transactions using getSignaturesForAddress.
+   * This works with all RPC providers (Helius, QuickNode, etc.)
+   * that don't support WebSocket logsSubscribe with mentions.
+   */
+  private async runPollingLoop(): Promise<void> {
+    // Seed lastSeenSignature with the most recent tx so we don't replay history
+    try {
+      const recent = await this.connection.getSignaturesForAddress(
+        this.programId,
+        { limit: 1 },
+        'confirmed'
+      );
+      if (recent.length > 0) {
+        this.lastSeenSignature = recent[0].signature;
+        this.logger.info('Polling seeded from latest signature', {
+          signature: this.lastSeenSignature.slice(0, 16) + '...',
+          slot: recent[0].slot,
+        });
+      }
+    } catch (err) {
+      this.logger.warn('Failed to seed polling cursor', { error: err });
+    }
+
+    while (this.isRunning) {
+      try {
+        await this.pollNewTransactions();
+      } catch (err) {
+        this.logger.error('Polling loop error', { error: err });
+      }
+      await sleep(this.config.pollIntervalMs || 5000);
+    }
+  }
+
+  /**
+   * Fetch new confirmed signatures for the bridge program since our last cursor,
+   * then fetch each transaction's logs and parse deposit events.
+   */
+  private async pollNewTransactions(): Promise<void> {
+    const opts: any = { limit: 50 };
+    if (this.lastSeenSignature) {
+      opts.until = this.lastSeenSignature;
+    }
+
+    // getSignaturesForAddress returns newest-first
+    const signatures = await this.connection.getSignaturesForAddress(
+      this.programId,
+      opts,
       'confirmed'
     );
 
-    this.logger.info('Subscribed to program logs');
+    if (signatures.length === 0) return;
+
+    // Process oldest-first so our cursor advances correctly
+    const chronological = [...signatures].reverse();
+
+    this.logger.debug('Poll found new transactions', { count: chronological.length });
+
+    for (const sigInfo of chronological) {
+      if (sigInfo.err) continue; // Skip failed txs
+
+      try {
+        const tx = await this.connection.getTransaction(sigInfo.signature, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0,
+        });
+
+        if (!tx || !tx.meta?.logMessages) continue;
+
+        // Build a logs object compatible with processLogs
+        const logsObj = {
+          signature: sigInfo.signature,
+          logs: tx.meta.logMessages,
+          err: tx.meta.err,
+        };
+
+        const ctx: Context = { slot: tx.slot };
+        await this.processLogs(logsObj, ctx);
+      } catch (err) {
+        this.logger.debug('Failed to fetch/parse tx during polling', {
+          signature: sigInfo.signature,
+          error: err,
+        });
+      }
+    }
+
+    // Advance cursor to the newest signature we've seen
+    this.lastSeenSignature = signatures[0].signature;
   }
 
   private async processLogs(logs: any, ctx: Context): Promise<void> {
@@ -160,11 +317,28 @@ export class SolanaWatcher extends EventEmitter {
     signature: string
   ): SolanaDepositEvent | null {
     try {
-      if (data.length < 120) return null;
+      // BridgeDeposit event layout (after 8-byte Anchor discriminator):
+      //   transfer_id: [u8; 32]     offset 0
+      //   message_id:  [u8; 32]     offset 32
+      //   sender:      Pubkey(32)   offset 64
+      //   recipient:   [u8; 32]     offset 96
+      //   amount:      u64          offset 128
+      //   nonce:       u64          offset 136
+      //   slot:        u64          offset 144
+      //   event_index: u32          offset 152
+      //   timestamp:   i64          offset 156
+      //   src_chain_id: u32         offset 164
+      //   dst_chain_id: u32         offset 168
+      //   asset_id:    Pubkey(32)   offset 172
+      //   Total: 204 bytes
+      if (data.length < 204) return null;
 
       let offset = 0;
 
       const transferId = data.subarray(offset, offset + 32).toString('hex');
+      offset += 32;
+
+      const messageId = data.subarray(offset, offset + 32).toString('hex');
       offset += 32;
 
       const sender = new PublicKey(data.subarray(offset, offset + 32)).toBase58();
@@ -182,20 +356,33 @@ export class SolanaWatcher extends EventEmitter {
       const eventSlot = Number(data.readBigUInt64LE(offset));
       offset += 8;
 
+      const eventIndex = data.readUInt32LE(offset);
+      offset += 4;
+
       const timestamp = Number(data.readBigInt64LE(offset));
       offset += 8;
 
-      const chainId = data.readUInt32LE(offset);
+      const srcChainId = data.readUInt32LE(offset);
+      offset += 4;
+
+      const dstChainId = data.readUInt32LE(offset);
+      offset += 4;
+
+      // asset_id is at offset 172, 32 bytes (not used in relay but logged)
 
       return {
         transferId,
+        messageId,
         sender,
         recipientDcc,
         amount,
         nonce,
         slot: eventSlot,
+        eventIndex,
         timestamp,
-        chainId,
+        srcChainId,
+        dstChainId,
+        chainId: srcChainId,
         signature,
         confirmations: 0,
       };
@@ -353,11 +540,12 @@ export class SolanaWatcher extends EventEmitter {
   /**
    * Get the current health status of the watcher
    */
-  getHealth(): { running: boolean; pendingEvents: number; lastSlot: number } {
+  getHealth(): { running: boolean; pendingEvents: number; lastSlot: number; mode: string } {
     return {
       running: this.isRunning,
       pendingEvents: this.pendingEvents.size,
       lastSlot: this.lastProcessedSlot,
+      mode: this.usePolling ? 'polling' : 'websocket',
     };
   }
 }

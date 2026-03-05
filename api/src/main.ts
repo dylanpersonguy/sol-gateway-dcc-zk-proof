@@ -46,17 +46,25 @@ async function main(): Promise<void> {
   }));
 
   // ── Rate Limiting ──
+  const isInternalRequest = (req: any) => {
+    const ip = req.ip || req.connection?.remoteAddress || '';
+    return ip === '127.0.0.1' || ip === '::1' || ip.startsWith('::ffff:127.') ||
+           ip.startsWith('172.') || ip.startsWith('10.') || ip === '::ffff:172.22.0.1';
+  };
+
   const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 100,
     standardHeaders: true,
     legacyHeaders: false,
+    skip: isInternalRequest,
     message: { error: 'Too many requests — rate limit exceeded' },
   });
 
   const depositLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute
     max: 10,
+    skip: isInternalRequest,
     message: { error: 'Deposit rate limit exceeded — try again later' },
   });
 

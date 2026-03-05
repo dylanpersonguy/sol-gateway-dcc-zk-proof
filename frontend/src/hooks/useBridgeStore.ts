@@ -14,6 +14,8 @@ export interface ActiveTransfer {
   splMint?: string;
   /** Display symbol (e.g. "SOL", "USDC") */
   tokenSymbol?: string;
+  /** Whether this transfer uses ZK proof path (>=100 SOL) */
+  useZk?: boolean;
 }
 
 interface BridgeState {

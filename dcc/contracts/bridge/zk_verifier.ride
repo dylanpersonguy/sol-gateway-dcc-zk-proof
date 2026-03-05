@@ -1,0 +1,566 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+# ═══════════════════════════════════════════════════════════════
+# DCC ZK Verifier Contract (Contract B)
+# ═══════════════════════════════════════════════════════════════
+#
+# SECURITY ROOT: Groth16 ZK proofs on BN128.
+# This contract verifies a Groth16 proof that a Solana deposit event:
+#   1. Has a valid message_id = Keccak256(canonical_preimage)
+#   2. Is included in a committed checkpoint (Merkle inclusion)
+#   3. Matches the declared amount, recipient, and version
+#
+# Upon successful verification, this contract calls Contract A
+# (Bridge Core) via invoke() to authorize the mint.
+#
+# This is an atomic cross-contract call: if anything fails,
+# the entire transaction reverts. i.caller is set by the DCC
+# runtime and cannot be spoofed.
+#
+# RIDE v5 compatible (for groth16Verify_8inputs support)
+
+# ═══════════════════════════════════════════════════════════════
+# CONSTANTS
+# ═══════════════════════════════════════════════════════════════
+
+let bridgeVersion = 1
+let solChainId = 1
+let dccChainId = 2
+let domainSeparator = "DCC_SOL_BRIDGE_V1"
+
+# Proof format constraints
+# BN256 (alt_bn128) Groth16 compressed: pi_a(32) + pi_b(64) + pi_c(32) = 128 bytes
+let proofMinSize = 128
+let inputsSize = 256
+
+# Checkpoint freshness
+let maxCheckpointAge = 10080
+let checkpointExpiryBlocks = 1440
+
+# ═══════════════════════════════════════════════════════════════
+# STATE KEYS
+# ═══════════════════════════════════════════════════════════════
+
+func keyAdmin() = "admin"
+func keyBridgeCoreAddress() = "bridge_core_address"
+func keyPaused() = "paused"
+
+# Groth16 verifying key (stored as base64 ByteVector)
+func keyVerifyingKey() = "groth16_vk"
+func keyVkSet() = "groth16_vk_set"
+
+# Checkpoint registry
+func keyCheckpointRoot(id: Int) = "checkpoint_" + id.toString() + "_root"
+func keyCheckpointSlot(id: Int) = "checkpoint_" + id.toString() + "_slot"
+func keyCheckpointActive(id: Int) = "checkpoint_" + id.toString() + "_active"
+func keyCheckpointHeight(id: Int) = "checkpoint_" + id.toString() + "_height"
+func keyNextCheckpointId() = "next_checkpoint_id"
+
+# Committee-based checkpoint approval
+func keyCommitteeMember(addr: String) = "committee_" + addr
+func keyCommitteeSize() = "committee_size"
+func keyApprovalThreshold() = "approval_threshold"
+func keyProposalRoot(proposalId: Int) = "proposal_" + proposalId.toString() + "_root"
+func keyProposalSlot(proposalId: Int) = "proposal_" + proposalId.toString() + "_slot"
+func keyProposalApprovalCount(proposalId: Int) = "proposal_" + proposalId.toString() + "_approvals"
+func keyProposalApproved(proposalId: Int, addr: String) = "proposal_" + proposalId.toString() + "_approved_" + addr
+func keyProposalFinalized(proposalId: Int) = "proposal_" + proposalId.toString() + "_finalized"
+func keyNextProposalId() = "next_proposal_id"
+
+# Replay protection (duplicated here to prevent re-verification)
+func keyZkProcessed(messageId: String) = "zk_processed_" + messageId
+
+# ═══════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS
+# ═══════════════════════════════════════════════════════════════
+
+func isAdmin(caller: Address) = {
+    let admin = getStringValue(this, keyAdmin())
+    caller.toString() == admin
+}
+
+func isPaused() = {
+    getBooleanValue(this, keyPaused())
+}
+
+func isVkSet() = {
+    match getBoolean(this, keyVkSet()) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func getVerifyingKey() = {
+    getBinaryValue(this, keyVerifyingKey())
+}
+
+func isCheckpointActive(id: Int) = {
+    match getBoolean(this, keyCheckpointActive(id)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func getCheckpointRoot(id: Int) = {
+    getBinaryValue(this, keyCheckpointRoot(id))
+}
+
+func isCommitteeMember(addr: String) = {
+    match getBoolean(this, keyCommitteeMember(addr)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func getCommitteeSize() = {
+    match getInteger(this, keyCommitteeSize()) {
+        case n: Int => n
+        case _ => 0
+    }
+}
+
+func getApprovalThreshold() = {
+    match getInteger(this, keyApprovalThreshold()) {
+        case n: Int => n
+        case _ => 0
+    }
+}
+
+func isZkProcessed(messageId: String) = {
+    match getBoolean(this, keyZkProcessed(messageId)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# BYTE REVERSAL & FIELD ELEMENT HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+func reverseBytes16(bv: ByteVector) = {
+    take(drop(bv, 15), 1) + take(drop(bv, 14), 1) + take(drop(bv, 13), 1) +
+    take(drop(bv, 12), 1) + take(drop(bv, 11), 1) + take(drop(bv, 10), 1) +
+    take(drop(bv, 9), 1) + take(drop(bv, 8), 1) + take(drop(bv, 7), 1) +
+    take(drop(bv, 6), 1) + take(drop(bv, 5), 1) + take(drop(bv, 4), 1) +
+    take(drop(bv, 3), 1) + take(drop(bv, 2), 1) + take(drop(bv, 1), 1) +
+    take(bv, 1)
+}
+
+# Reconstruct a 32-byte hash from two 128-bit field elements (each 32 bytes BE)
+func reconstruct256(feLo: ByteVector, feHi: ByteVector) = {
+    reverseBytes16(drop(feLo, 16)) + reverseBytes16(drop(feHi, 16))
+}
+
+# Extract a 64-bit integer from a 32-byte BE field element
+func fieldElementToInt(fe: ByteVector) = {
+    toInt(fe, 24)
+}
+
+# Extract a 32-bit integer from a 32-byte BE field element
+func fieldElementToInt32(fe: ByteVector) = {
+    toInt(fe, 24)
+}
+
+# ═══════════════════════════════════════════════════════════════
+# LITTLE-ENDIAN BYTE ENCODING HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+func intToLE4(v: Int) = {
+    let b0 = v % 256
+    let b1 = (v / 256) % 256
+    let b2 = (v / 65536) % 256
+    let b3 = (v / 16777216) % 256
+    toBytes(b0).drop(7) + toBytes(b1).drop(7) + toBytes(b2).drop(7) + toBytes(b3).drop(7)
+}
+
+func intToLE8(v: Int) = {
+    let b0 = v % 256
+    let b1 = (v / 256) % 256
+    let b2 = (v / 65536) % 256
+    let b3 = (v / 16777216) % 256
+    let b4 = (v / 4294967296) % 256
+    let b5 = (v / 1099511627776) % 256
+    let b6 = (v / 281474976710656) % 256
+    let b7 = (v / 72057594037927936) % 256
+    toBytes(b0).drop(7) + toBytes(b1).drop(7) + toBytes(b2).drop(7) + toBytes(b3).drop(7) +
+    toBytes(b4).drop(7) + toBytes(b5).drop(7) + toBytes(b6).drop(7) + toBytes(b7).drop(7)
+}
+
+# Compute message_id = keccak256(canonical_preimage)
+# Total preimage: 181 bytes
+func computeMessageId(
+    srcChainId: Int,
+    dstChainId: Int,
+    srcProgramId: ByteVector,
+    slot: Int,
+    eventIndex: Int,
+    sender: ByteVector,
+    recipient: ByteVector,
+    amount: Int,
+    nonce: Int,
+    assetId: ByteVector
+) = {
+    if (size(srcProgramId) != 32) then throw("srcProgramId must be 32 bytes")
+    else if (size(sender) != 32) then throw("sender must be 32 bytes")
+    else if (size(recipient) != 32) then throw("recipient must be 32 bytes")
+    else if (size(assetId) != 32) then throw("assetId must be 32 bytes")
+    else {
+        let domainBytes = toBytes(domainSeparator)
+        if (size(domainBytes) != 17) then throw("Domain separator encoding error")
+        else {
+        let preimage = domainBytes +
+            intToLE4(srcChainId) +
+            intToLE4(dstChainId) +
+            srcProgramId +
+            intToLE8(slot) +
+            intToLE4(eventIndex) +
+            sender +
+            recipient +
+            intToLE8(amount) +
+            intToLE8(nonce) +
+            assetId
+        keccak256(preimage)
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# INITIALIZE
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func initialize(bridgeCoreAddress: String) = {
+    if (isDefined(getString(this, keyAdmin()))) then throw("Already initialized")
+    else {
+        [
+            StringEntry(keyAdmin(), i.caller.toString()),
+            StringEntry(keyBridgeCoreAddress(), bridgeCoreAddress),
+            BooleanEntry(keyPaused(), false),
+            BooleanEntry(keyVkSet(), false),
+            IntegerEntry(keyNextCheckpointId(), 0),
+            IntegerEntry(keyNextProposalId(), 0)
+        ]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# SET VERIFYING KEY (admin-only, can be reset then re-set)
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func resetVerifyingKey() = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [
+            BooleanEntry(keyVkSet(), false),
+            DeleteEntry(keyVerifyingKey()),
+            DeleteEntry("groth16_vk_hash")
+        ]
+    }
+}
+
+@Callable(i)
+func setVerifyingKey(vk: ByteVector, expectedHash: ByteVector) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (isVkSet()) then throw("Verifying key already set — call resetVerifyingKey first")
+    else if (size(vk) == 0) then throw("Empty verifying key")
+    else if (size(expectedHash) != 32) then throw("Expected hash must be 32 bytes")
+    else {
+        let actualHash = keccak256(vk)
+        if (actualHash != expectedHash) then throw("VK hash mismatch — possible tampering")
+        else {
+            [
+                BinaryEntry(keyVerifyingKey(), vk),
+                BooleanEntry(keyVkSet(), true),
+                BinaryEntry("groth16_vk_hash", actualHash)
+            ]
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# CHECKPOINT COMMITTEE MANAGEMENT
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func initializeCommittee(pk1: String, pk2: String, pk3: String, threshold: Int) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (threshold < 2) then throw("Threshold must be at least 2")
+    else if (threshold > 3) then throw("Threshold cannot exceed committee size")
+    else {
+        [
+            BooleanEntry(keyCommitteeMember(pk1), true),
+            BooleanEntry(keyCommitteeMember(pk2), true),
+            BooleanEntry(keyCommitteeMember(pk3), true),
+            IntegerEntry(keyCommitteeSize(), 3),
+            IntegerEntry(keyApprovalThreshold(), threshold),
+            IntegerEntry(keyNextProposalId(), 0)
+        ]
+    }
+}
+
+@Callable(i)
+func proposeCheckpoint(slot: Int, commitmentRoot: ByteVector) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else if (size(commitmentRoot) != 32) then throw("Invalid root length")
+    else if (commitmentRoot == base58'11111111111111111111111111111111') then throw("Zero root rejected")
+    else {
+        let committeeSize = getCommitteeSize()
+        let callerAddr = toBase58String(i.callerPublicKey)
+        if (committeeSize == 0) then throw("Committee not initialized")
+        else if (!isCommitteeMember(callerAddr)) then throw("Not a committee member")
+        else {
+            let nextProposal = match getInteger(this, keyNextProposalId()) {
+                case n: Int => n
+                case _ => 0
+            }
+            [
+                BinaryEntry(keyProposalRoot(nextProposal), commitmentRoot),
+                IntegerEntry(keyProposalSlot(nextProposal), slot),
+                IntegerEntry(keyProposalApprovalCount(nextProposal), 1),
+                BooleanEntry(keyProposalApproved(nextProposal, callerAddr), true),
+                BooleanEntry(keyProposalFinalized(nextProposal), false),
+                IntegerEntry(keyNextProposalId(), nextProposal + 1)
+            ]
+        }
+    }
+}
+
+@Callable(i)
+func approveCheckpoint(proposalId: Int) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else {
+        let callerAddr = toBase58String(i.callerPublicKey)
+        if (!isCommitteeMember(callerAddr)) then throw("Not a committee member")
+        else {
+            let isFinalized = match getBoolean(this, keyProposalFinalized(proposalId)) {
+                case b: Boolean => b
+                case _ => throw("Proposal does not exist")
+            }
+            if (isFinalized) then throw("Proposal already finalized")
+            else {
+                let alreadyApproved = match getBoolean(this, keyProposalApproved(proposalId, callerAddr)) {
+                    case b: Boolean => b
+                    case _ => false
+                }
+                if (alreadyApproved) then throw("Already approved")
+                else {
+                    let currentApprovals = getIntegerValue(this, keyProposalApprovalCount(proposalId))
+                    let newApprovals = currentApprovals + 1
+                    let threshold = getApprovalThreshold()
+
+                    if (newApprovals >= threshold) then {
+                        let commitmentRoot = getBinaryValue(this, keyProposalRoot(proposalId))
+                        let slot = getIntegerValue(this, keyProposalSlot(proposalId))
+                        let nextId = match getInteger(this, keyNextCheckpointId()) {
+                            case n: Int => n
+                            case _ => 0
+                        }
+                        [
+                            IntegerEntry(keyProposalApprovalCount(proposalId), newApprovals),
+                            BooleanEntry(keyProposalApproved(proposalId, callerAddr), true),
+                            BooleanEntry(keyProposalFinalized(proposalId), true),
+                            BinaryEntry(keyCheckpointRoot(nextId), commitmentRoot),
+                            IntegerEntry(keyCheckpointSlot(nextId), slot),
+                            BooleanEntry(keyCheckpointActive(nextId), true),
+                            IntegerEntry(keyCheckpointHeight(nextId), height),
+                            IntegerEntry(keyNextCheckpointId(), nextId + 1)
+                        ]
+                    }
+                    else {
+                        [
+                            IntegerEntry(keyProposalApprovalCount(proposalId), newApprovals),
+                            BooleanEntry(keyProposalApproved(proposalId, callerAddr), true)
+                        ]
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Callable(i)
+func deactivateCheckpoint(checkpointId: Int) = {
+    if (!isCheckpointActive(checkpointId)) then throw("Checkpoint not active")
+    else {
+        let registeredHeight = getIntegerValue(this, keyCheckpointHeight(checkpointId))
+        let isExpired = (height - registeredHeight) >= checkpointExpiryBlocks
+        if (!isAdmin(i.caller) && !isExpired) then throw("Unauthorized: checkpoint not yet expired")
+        else {
+            [BooleanEntry(keyCheckpointActive(checkpointId), false)]
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# VERIFY AND MINT — Groth16 Proof Verification + Cross-Contract Mint
+# ═══════════════════════════════════════════════════════════════
+#
+# PUBLIC INPUTS (8 field elements, each 32 bytes BE):
+#   [0] checkpoint_root_lo  (128-bit)
+#   [1] checkpoint_root_hi  (128-bit)
+#   [2] message_id_lo       (128-bit)
+#   [3] message_id_hi       (128-bit)
+#   [4] amount              (64-bit transfer amount)
+#   [5] recipient_lo        (128-bit)
+#   [6] recipient_hi        (128-bit)
+#   [7] version             (32-bit protocol version)
+
+@Callable(i)
+func verifyAndMint(
+    proof: ByteVector,
+    inputs: ByteVector,
+    checkpointId: Int,
+    srcChainId: Int,
+    dstChainId: Int,
+    srcProgramId: ByteVector,
+    slot: Int,
+    eventIndex: Int,
+    sender: ByteVector,
+    recipient: ByteVector,
+    amount: Int,
+    nonce: Int,
+    assetId: ByteVector,
+    recipientAddress: String
+) = {
+    if (isPaused()) then throw("Bridge is paused")
+    else if (!isVkSet()) then throw("Verifying key not set")
+    else if (size(proof) < proofMinSize) then throw("Proof too short")
+    else if (size(inputs) != inputsSize) then throw("Invalid inputs length: expected 256 bytes")
+    else if (!isCheckpointActive(checkpointId)) then throw("Checkpoint not active")
+    else {
+        # Checkpoint freshness
+        let cpHeight = getIntegerValue(this, keyCheckpointHeight(checkpointId))
+        if (height - cpHeight > maxCheckpointAge) then throw("Checkpoint too old")
+        else {
+
+        # STEP 1: RIDE recomputes message_id (defense-in-depth)
+        let localMessageId = computeMessageId(
+            srcChainId, dstChainId, srcProgramId,
+            slot, eventIndex, sender, recipient,
+            amount, nonce, assetId
+        )
+        let messageIdStr = toBase58String(localMessageId)
+
+        # Replay protection
+        if (isZkProcessed(messageIdStr)) then throw("Already ZK-processed: " + messageIdStr)
+        else {
+
+        # STEP 2: Extract values from ZK proof public inputs
+        let feRootLo = take(inputs, 32)
+        let feRootHi = take(drop(inputs, 32), 32)
+        let feMsgIdLo = take(drop(inputs, 64), 32)
+        let feMsgIdHi = take(drop(inputs, 96), 32)
+        let feAmount = take(drop(inputs, 128), 32)
+        let feRecipLo = take(drop(inputs, 160), 32)
+        let feRecipHi = take(drop(inputs, 192), 32)
+        let feVersion = take(drop(inputs, 224), 32)
+
+        let proofRoot = reconstruct256(feRootLo, feRootHi)
+        let proofMessageId = reconstruct256(feMsgIdLo, feMsgIdHi)
+        let proofAmount = fieldElementToInt(feAmount)
+        let proofRecipient = reconstruct256(feRecipLo, feRecipHi)
+        let proofVersion = fieldElementToInt32(feVersion)
+
+        # STEP 3: Cross-validate RIDE-computed vs proof-embedded values
+        if (localMessageId != proofMessageId) then
+            throw("CRITICAL: message_id mismatch between RIDE and proof")
+        else if (proofAmount != amount) then
+            throw("Amount mismatch: proof=" + proofAmount.toString() + " caller=" + amount.toString())
+        else if (proofRecipient != recipient) then
+            throw("Recipient mismatch between proof and caller value")
+        else {
+
+        # STEP 4: Domain validation
+        let storedRoot = getCheckpointRoot(checkpointId)
+        if (proofRoot != storedRoot) then throw("Checkpoint root mismatch")
+        else if (proofVersion != bridgeVersion) then
+            throw("Version mismatch: expected " + bridgeVersion.toString())
+        else if (srcChainId != solChainId) then throw("Invalid source chain")
+        else if (dstChainId != dccChainId) then throw("Invalid destination chain")
+        else {
+
+        # STEP 5: GROTH16 VERIFICATION — THE SECURITY ROOT
+        # Uses bn256Groth16Verify (BN128/alt_bn128 curve, 256-byte proof)
+        let vk = getVerifyingKey()
+        if (!bn256Groth16Verify_8inputs(vk, proof, inputs)) then
+            throw("ZK PROOF VERIFICATION FAILED — mint rejected")
+        else {
+
+        # STEP 6: Cross-contract call to Bridge Core for actual minting
+        let bridgeCoreAddr = getStringValue(this, keyBridgeCoreAddress())
+        let mintResult = invoke(
+            addressFromStringValue(bridgeCoreAddr),
+            "zkMintAuthorized",
+            [recipientAddress, amount, messageIdStr, slot],
+            []
+        )
+
+        if (mintResult == mintResult) then {
+            [
+                BooleanEntry(keyZkProcessed(messageIdStr), true)
+            ]
+        }
+        else throw("Unreachable")
+
+        }
+        }
+        }
+        }
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# EMERGENCY CONTROLS
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func emergencyPause() = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [BooleanEntry(keyPaused(), true)]
+    }
+}
+
+@Callable(i)
+func unpause() = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [BooleanEntry(keyPaused(), false)]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# ADMIN
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func updateBridgeCoreAddress(newAddress: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [StringEntry(keyBridgeCoreAddress(), newAddress)]
+    }
+}
+
+@Callable(i)
+func transferAdmin(newAdmin: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [StringEntry(keyAdmin(), newAdmin)]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# VERIFIER — Prevents direct state manipulation
+# ═══════════════════════════════════════════════════════════════
+
+@Verifier(tx)
+func verify() = {
+    match tx {
+        case dt: DataTransaction => false
+        case _ => sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+    }
+}

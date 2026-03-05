@@ -6,12 +6,15 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { createLogger } from '../utils/logger';
 import {
   isTransferProcessed,
+  isZkProcessed,
   getBurnRecord,
   getDccConfig,
 } from '../utils/dcc-helpers';
 import {
   getTransferById,
   getTransfersByAddress,
+  createTransfer,
+  updateTransferStatus as updateTransferInDb,
 } from '../utils/transfer-store';
 
 const logger = createLogger('TransferRoute');
@@ -50,6 +53,75 @@ export interface TransferDetails {
 }
 
 /**
+ * POST /api/v1/transfer/register
+ *
+ * Register a new transfer the frontend just submitted on Solana.
+ * This creates a record in the local DB so status polling works.
+ */
+transferRouter.post('/register', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { transferId, sender, recipient, amount, amountFormatted, splMint, sourceTxHash, direction } = req.body;
+
+    if (!transferId || transferId.length < 16) {
+      return res.status(400).json({ error: 'Invalid transfer ID' });
+    }
+
+    logger.info('Registering transfer', { transferId, sender, amount });
+
+    const sourceChain = direction === 'dcc_to_sol' ? 'dcc' : 'solana';
+    const destChain = direction === 'dcc_to_sol' ? 'solana' : 'dcc';
+
+    createTransfer({
+      transferId,
+      sourceChain: sourceChain as 'solana' | 'dcc',
+      destChain: destChain as 'solana' | 'dcc',
+      sender: sender || '',
+      recipient: recipient || '',
+      amount: amount || '0',
+      amountFormatted: amountFormatted || undefined,
+      splMint: splMint || undefined,
+      sourceTxHash: sourceTxHash || undefined,
+    });
+
+    res.json({ success: true, transferId });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/v1/transfer/notify-complete
+ *
+ * Internal endpoint called by validators after verifyAndMint succeeds.
+ * Updates the transfer status to 'completed' and broadcasts via SSE.
+ */
+transferRouter.post('/notify-complete', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { transferId, status, destTxHash } = req.body;
+
+    if (!transferId || transferId.length < 16) {
+      return res.status(400).json({ error: 'Invalid transfer ID' });
+    }
+
+    logger.info('Transfer completion notification', { transferId, status, destTxHash });
+
+    updateTransferInDb(transferId, status || 'completed', {
+      destTxHash: destTxHash || undefined,
+    });
+
+    // Broadcast to SSE clients
+    broadcastTransferUpdate(transferId, {
+      status: status || 'completed',
+      destTxHash: destTxHash || null,
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * GET /api/v1/transfer/:id
  * 
  * Get detailed status of a bridge transfer
@@ -86,7 +158,26 @@ transferRouter.get('/:id', async (req: Request, res: Response, next: NextFunctio
           if (burnRecord) status = 'completed';
         }
       } catch (err: any) {
-        logger.warn('Failed to query DCC for transfer status', { transferId: id, error: err.message });
+        logger.warn('Failed to query DCC bridge core for transfer status', { transferId: id, error: err.message });
+      }
+
+      // Also check ZK verifier contract (ZK-processed deposits)
+      if (status !== 'completed' && dccCfg.zkVerifierContract) {
+        try {
+          const zkDone = await isZkProcessed(
+            dccCfg.zkVerifierContract,
+            id,
+            dccCfg.nodeUrl,
+          );
+          if (zkDone) status = 'completed';
+        } catch (err: any) {
+          logger.warn('Failed to query DCC ZK verifier for transfer status', { transferId: id, error: err.message });
+        }
+      }
+
+      // Update DB if status changed
+      if (status === 'completed' && dbTransfer && dbTransfer.status !== 'completed') {
+        try { updateTransferInDb(id, 'completed'); } catch {}
       }
     }
 

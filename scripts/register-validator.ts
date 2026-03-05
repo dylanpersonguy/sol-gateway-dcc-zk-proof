@@ -29,7 +29,7 @@ async function main() {
   const clusterUrls: Record<string, string> = {
     localnet: "http://127.0.0.1:8899",
     devnet: "https://api.devnet.solana.com",
-    mainnet: "https://api.mainnet-beta.solana.com",
+    mainnet: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
   };
   const rpcUrl = clusterUrls[network];
   if (!rpcUrl) throw new Error(`Unknown network: ${network}`);

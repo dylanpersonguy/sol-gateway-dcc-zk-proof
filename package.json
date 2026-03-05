@@ -43,6 +43,6 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@decentralchain/decentralchain-transactions": "file:../../../tmp/dcc-tx-build/decentralchain-decentralchain-transactions-5.0.0.tgz"
+    "@decentralchain/decentralchain-transactions": "file:vendor/decentralchain-decentralchain-transactions-5.0.0.tgz"
   }
 }

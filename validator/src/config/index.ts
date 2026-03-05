@@ -56,6 +56,14 @@ export interface ValidatorConfig {
   hsmSlot: number;
   hsmPin: string;
   keyRotationIntervalHours: number;
+
+  // ── ZK Bridge (Phase 2) ──
+  zkVerifierContract: string;
+  zkWasmPath: string;
+  zkZkeyPath: string;
+  zkVkeyPath: string;
+  zkCheckpointWindowMs: number;
+  zkMaxEventsPerCheckpoint: number;
 }
 
 export function loadConfig(): ValidatorConfig {
@@ -100,6 +108,14 @@ export function loadConfig(): ValidatorConfig {
     hsmSlot: parseInt(process.env.HSM_SLOT || '0'),
     hsmPin: process.env.HSM_PIN || '',
     keyRotationIntervalHours: parseInt(process.env.KEY_ROTATION_HOURS || '168'),
+
+    // ZK Bridge (Phase 2)
+    zkVerifierContract: process.env.DCC_ZK_VERIFIER_CONTRACT || '',
+    zkWasmPath: process.env.ZK_WASM_PATH || 'zk/circuits/build/bridge_deposit_js/bridge_deposit.wasm',
+    zkZkeyPath: process.env.ZK_ZKEY_PATH || 'zk/circuits/build/bridge_deposit_final.zkey',
+    zkVkeyPath: process.env.ZK_VKEY_PATH || 'zk/circuits/build/verification_key.json',
+    zkCheckpointWindowMs: parseInt(process.env.ZK_CHECKPOINT_WINDOW_MS || '60000'),
+    zkMaxEventsPerCheckpoint: parseInt(process.env.ZK_MAX_EVENTS_PER_CHECKPOINT || '100'),
   };
 }
 

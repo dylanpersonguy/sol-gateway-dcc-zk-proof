@@ -4,9 +4,11 @@ import {
   WalletProvider,
 } from '@solana/wallet-adapter-react';
 import { WalletError } from '@solana/wallet-adapter-base';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { BridgeInterface } from './components/BridgeInterface';
 import { Header } from './components/Header';
 import { StatusBar } from './components/StatusBar';
+import { DocsPage } from './components/DocsPage';
 import { Toaster } from 'react-hot-toast';
 import toast from 'react-hot-toast';
 
@@ -39,23 +41,41 @@ function App() {
     <ConnectionProvider endpoint={SOLANA_RPC}>
       <WalletProvider wallets={wallets} localStorageKey="walletName_bridge" onError={onError}>
         <PhantomProvider>
-          <div className="min-h-screen bg-gray-950">
-            <Header />
-            <main className="max-w-2xl mx-auto px-4 py-8">
-              <BridgeInterface />
-            </main>
-            <StatusBar />
-            <Toaster
-              position="bottom-right"
-              toastOptions={{
-                style: {
-                  background: '#1f2937',
-                  color: '#fff',
-                  border: '1px solid #374151',
-                },
-              }}
-            />
-          </div>
+          <BrowserRouter>
+            <Routes>
+              {/* Docs page — standalone layout */}
+              <Route path="/docs" element={<DocsPage />} />
+
+              {/* Main bridge app */}
+              <Route
+                path="*"
+                element={
+                  <div className="min-h-screen bg-gray-950 relative overflow-hidden">
+                    {/* Ambient background glow */}
+                    <div className="pointer-events-none fixed inset-0 z-0">
+                      <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] rounded-full bg-purple-900/10 blur-[120px]" />
+                      <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] rounded-full bg-indigo-900/10 blur-[100px]" />
+                    </div>
+                    <Header />
+                    <main className="relative z-10 max-w-xl mx-auto px-4 py-8 pb-16">
+                      <BridgeInterface />
+                    </main>
+                    <StatusBar />
+                    <Toaster
+                      position="bottom-right"
+                      toastOptions={{
+                        style: {
+                          background: '#1f2937',
+                          color: '#fff',
+                          border: '1px solid #374151',
+                        },
+                      }}
+                    />
+                  </div>
+                }
+              />
+            </Routes>
+          </BrowserRouter>
         </PhantomProvider>
       </WalletProvider>
     </ConnectionProvider>

@@ -242,6 +242,9 @@ template KeccakF1600() {
 
 /**
  * Single Keccak round: θ → ρ → π → χ → ι
+ *
+ * State layout: state[64*(5*y + x) + z] = A[x, y, z]
+ * (NIST FIPS 202, Section 3.1.2)
  */
 template KeccakRound(ROUND) {
     signal input in[1600];
@@ -260,7 +263,7 @@ template KeccakRound(ROUND) {
         for (var z = 0; z < 64; z++) {
             col_parity[x][z] = Xor5();
             for (var y = 0; y < 5; y++) {
-                col_parity[x][z].in[y] <== in[64*(5*x + y) + z];
+                col_parity[x][z].in[y] <== in[64*(5*y + x) + z];
             }
             C[x][z] <== col_parity[x][z].out;
         }
@@ -287,9 +290,9 @@ template KeccakRound(ROUND) {
         for (var y = 0; y < 5; y++) {
             for (var z = 0; z < 64; z++) {
                 theta_xor[x][y][z] = Xor2();
-                theta_xor[x][y][z].a <== in[64*(5*x + y) + z];
+                theta_xor[x][y][z].a <== in[64*(5*y + x) + z];
                 theta_xor[x][y][z].b <== D[x][z];
-                after_theta[64*(5*x + y) + z] <== theta_xor[x][y][z].out;
+                after_theta[64*(5*y + x) + z] <== theta_xor[x][y][z].out;
             }
         }
     }
@@ -315,7 +318,7 @@ template KeccakRound(ROUND) {
             for (var z = 0; z < 64; z++) {
                 // Rotation: new_z = (z - rot) mod 64
                 var src_z = (z + 64 - rot) % 64;
-                after_rho_pi[64*(5*new_x + new_y) + z] <== after_theta[64*(5*x + y) + src_z];
+                after_rho_pi[64*(5*new_y + new_x) + z] <== after_theta[64*(5*y + x) + src_z];
             }
         }
     }
@@ -330,13 +333,13 @@ template KeccakRound(ROUND) {
         for (var y = 0; y < 5; y++) {
             for (var z = 0; z < 64; z++) {
                 chi_andnot[x][y][z] = AndNot();
-                chi_andnot[x][y][z].a <== after_rho_pi[64*(5*((x+2)%5) + y) + z];
-                chi_andnot[x][y][z].b <== after_rho_pi[64*(5*((x+1)%5) + y) + z];
+                chi_andnot[x][y][z].a <== after_rho_pi[64*(5*y + (x+2)%5) + z];
+                chi_andnot[x][y][z].b <== after_rho_pi[64*(5*y + (x+1)%5) + z];
                 
                 chi_xor[x][y][z] = Xor2();
-                chi_xor[x][y][z].a <== after_rho_pi[64*(5*x + y) + z];
+                chi_xor[x][y][z].a <== after_rho_pi[64*(5*y + x) + z];
                 chi_xor[x][y][z].b <== chi_andnot[x][y][z].out;
-                after_chi[64*(5*x + y) + z] <== chi_xor[x][y][z].out;
+                after_chi[64*(5*y + x) + z] <== chi_xor[x][y][z].out;
             }
         }
     }

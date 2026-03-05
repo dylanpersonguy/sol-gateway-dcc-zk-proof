@@ -115,14 +115,14 @@ export async function signAndBroadcastMint(params: {
   nodeUrl: string;
   seed: string;
 }): Promise<{ id: string }> {
-  // Build the invokeScript transaction matching the RIDE contract's mint function:
-  //   func mint(transferId: String, recipient: String, amount: Int, solSlot: Int,
-  //             signatures: List[ByteVector], pubkeys: List[ByteVector])
+  // Build the invokeScript transaction matching the RIDE contract's committeeMint function:
+  //   func committeeMint(transferId: String, recipient: String, amount: Int, solSlot: Int,
+  //                      signatures: List[ByteVector], pubkeys: List[ByteVector])
   const signedTx = invokeScript(
     {
       dApp: params.dApp,
       call: {
-        function: 'mint',
+        function: 'committeeMint',
         args: [
           { type: 'string', value: params.transferId },
           { type: 'string', value: params.recipient },
@@ -145,7 +145,7 @@ export async function signAndBroadcastMint(params: {
         ],
       },
       payment: [],
-      fee: 500000, // 0.005 DCC
+      fee: 900000, // 0.009 DCC (higher fee for complex tx with signature verification)
       chainId: params.chainId,
     },
     params.seed,

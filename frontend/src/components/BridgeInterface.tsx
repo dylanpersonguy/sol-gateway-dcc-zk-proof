@@ -1,6 +1,4 @@
-import React, { useState } from 'react';
-import { useWallet, useConnection } from '@solana/wallet-adapter-react';
-import { usePhantom } from '../context/PhantomContext';
+import React from 'react';
 import { useBridgeStore, BridgeDirection } from '../hooks/useBridgeStore';
 import { DepositForm } from './DepositForm';
 import { RedeemForm } from './RedeemForm';
@@ -9,8 +7,6 @@ import { TokenSelector, TokenLogo } from './TokenSelector';
 import { BRIDGE_TOKENS, CATEGORY_LABELS, type BridgeToken } from '../config/tokens';
 
 export function BridgeInterface() {
-  const { connected } = useWallet();
-  const { isConnected } = usePhantom();
   const { direction, setDirection, activeTransfer, selectedToken, setSelectedToken } = useBridgeStore();
 
   if (activeTransfer) {
@@ -50,16 +46,7 @@ export function BridgeInterface() {
       </div>
 
       {/* Main Form */}
-      {!connected && !isConnected ? (
-        <div className="card text-center py-12">
-          <p className="text-gray-400 text-lg mb-4">
-            Connect your Phantom wallet to start bridging
-          </p>
-          <p className="text-gray-500 text-sm">
-            Bridge {BRIDGE_TOKENS.length} tokens between Solana and DecentralChain
-          </p>
-        </div>
-      ) : direction === 'sol_to_dcc' ? (
+      {direction === 'sol_to_dcc' ? (
         <DepositForm />
       ) : (
         <RedeemForm />
@@ -68,36 +55,69 @@ export function BridgeInterface() {
       {/* Supported Tokens */}
       <SupportedTokens selectedToken={selectedToken} onSelect={setSelectedToken} />
 
-      {/* Security Info */}
-      <div className="card bg-gray-900/50">
-        <h3 className="text-sm font-semibold text-gray-300 mb-3">
-          Security Features
+      {/* How It Works */}
+      <div className="card-glow">
+        <h3 className="text-sm font-semibold text-gray-300 mb-4 flex items-center gap-2">
+          <span className="w-5 h-5 rounded gradient-zk flex items-center justify-center text-[10px] text-white font-bold">?</span>
+          How It Works
         </h3>
-        <div className="grid grid-cols-2 gap-3 text-xs text-gray-400">
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">✓</span>
-            M-of-N validator consensus
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">✓</span>
-            PDA-controlled vault
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">✓</span>
-            32+ block finality
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">✓</span>
-            Rate-limited withdrawals
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">✓</span>
-            Emergency circuit breakers
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-green-400">✓</span>
-            1:1 collateralized
-          </div>
+        <div className="flex items-start gap-0 text-center">
+          {[
+            { icon: '◎', label: 'Lock SOL', desc: 'Deposit into PDA vault' },
+            { icon: '⬡', label: 'Validate', desc: 'M-of-N checkpoint' },
+            { icon: 'π', label: 'ZK Prove', desc: 'Groth16 proof gen' },
+            { icon: '✓', label: 'Verify', desc: 'On-chain verification' },
+            { icon: '⊕', label: 'Mint', desc: 'wSOL.DCC issued' },
+          ].map((step, i) => (
+            <React.Fragment key={step.label}>
+              <div className="flex-1 min-w-0">
+                <div className={`w-9 h-9 mx-auto rounded-full flex items-center justify-center text-sm font-bold ${
+                  i === 2 || i === 3
+                    ? 'gradient-zk text-white'
+                    : 'bg-gray-800 text-gray-400 border border-gray-700'
+                }`}>
+                  {step.icon}
+                </div>
+                <p className="text-[11px] font-medium text-gray-300 mt-1.5">{step.label}</p>
+                <p className="text-[10px] text-gray-500 mt-0.5 leading-tight">{step.desc}</p>
+              </div>
+              {i < 4 && (
+                <div className="flex-shrink-0 w-6 flex items-center justify-center pt-3">
+                  <div className="h-px w-full bg-gray-700" />
+                </div>
+              )}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+
+      {/* ZK Security Panel */}
+      <div className="card bg-purple-950/20 border-purple-500/10">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-6 h-6 rounded-md gradient-zk flex items-center justify-center text-[10px] font-bold text-white">π</div>
+          <h3 className="text-sm font-semibold text-purple-300">Zero-Knowledge Security</h3>
+        </div>
+        <p className="text-xs text-gray-400 leading-relaxed mb-4">
+          Every transfer is cryptographically verified with a <span className="text-purple-300 font-medium">Groth16 zero-knowledge proof</span> on
+          the BN128 elliptic curve. No trust assumptions — only math.
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { icon: '🔒', label: 'Groth16 ZK Proofs', desc: '3.5M constraint circuit' },
+            { icon: '⬡', label: 'M-of-N Consensus', desc: 'Validator threshold signing' },
+            { icon: '🏦', label: 'PDA-Controlled Vault', desc: 'Non-custodial on Solana' },
+            { icon: '⚡', label: 'On-Chain Verification', desc: 'bn256Groth16Verify precompile' },
+            { icon: '🛡️', label: 'Rate-Limited', desc: 'Circuit breaker protection' },
+            { icon: '💎', label: '1:1 Collateralized', desc: 'Fully backed reserves' },
+          ].map((item) => (
+            <div key={item.label} className="flex items-start gap-2.5 p-2.5 rounded-lg bg-gray-800/40 border border-gray-700/30">
+              <span className="text-base flex-shrink-0 mt-0.5">{item.icon}</span>
+              <div>
+                <span className="text-xs font-medium text-gray-200 block">{item.label}</span>
+                <span className="text-[10px] text-gray-500">{item.desc}</span>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>

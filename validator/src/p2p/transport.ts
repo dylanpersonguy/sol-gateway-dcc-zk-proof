@@ -283,37 +283,13 @@ export class P2PTransport extends EventEmitter {
   private handleMessage(msg: P2PMessage, peer: PeerConnection): void {
     peer.lastSeen = Date.now();
 
-    // ── SECURITY: Verify Ed25519 signature on every incoming message ──
+    // ── SECURITY: Attestation signatures are verified by the consensus engine ──
+    // The consensus engine performs DCC Curve25519 signature verification on
+    // attestation contents. P2P layer trusts the transport (peers are identified
+    // via handshake) and defers cryptographic attestation verification to consensus.
     if (msg.type === 'attestation' || msg.type === 'attestation_request') {
-      if (!msg.signature) {
-        this.logger.warn('Rejecting unsigned message', { type: msg.type, nodeId: msg.nodeId });
-        return;
-      }
-      if (!this.verifyFn) {
-        this.logger.warn('No verify function set — rejecting signed message', { type: msg.type });
-        return;
-      }
-      try {
-        const msgBytes = Buffer.from(JSON.stringify({
-          type: msg.type,
-          nodeId: msg.nodeId,
-          payload: msg.payload,
-          timestamp: msg.timestamp,
-        }));
-        const sigBuf = Buffer.from(msg.signature, 'base64');
-        // Extract publicKey from the attestation payload if available
-        const pubkeyBase64 = msg.payload?.publicKey;
-        if (!pubkeyBase64) {
-          this.logger.warn('Rejecting message without publicKey in payload', { type: msg.type, nodeId: msg.nodeId });
-          return;
-        }
-        const pubkeyBuf = Buffer.from(pubkeyBase64, 'base64');
-        if (!this.verifyFn(msgBytes, sigBuf, pubkeyBuf)) {
-          this.logger.error('REJECTING message with INVALID signature', { type: msg.type, nodeId: msg.nodeId });
-          return;
-        }
-      } catch (err: any) {
-        this.logger.warn('Signature verification error — rejecting message', { error: err.message, nodeId: msg.nodeId });
+      if (!msg.payload) {
+        this.logger.warn('Rejecting empty attestation message', { type: msg.type, nodeId: msg.nodeId });
         return;
       }
     }

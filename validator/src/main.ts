@@ -8,6 +8,7 @@
 // 3. Consensus Engine — BFT agreement on events
 // 4. Threshold Signer — cryptographic signing
 // 5. Chain Submitter — submits consensus results to chains
+// 6. ZK Bridge Service — checkpoint + Groth16 proof pipeline (Phase 2)
 //
 // This node is one of M-of-N validators required for bridge operation.
 
@@ -19,6 +20,7 @@ import { ThresholdSigner } from './signer/threshold-signer';
 import { P2PTransport } from './p2p/transport';
 import { createLogger } from './utils/logger';
 import { RateLimiter } from './utils/rate-limiter';
+import { ZkBridgeService } from './zk/zk-bridge-service';
 import {
   Connection,
   Keypair,
@@ -35,12 +37,18 @@ import {
   signAndBroadcastMint,
   getAddressFromSeed,
 } from './utils/dcc-helpers';
+import {
+  signBytes as dccSignBytes,
+  publicKey as dccPublicKey,
+  base58Decode as dccBase58Decode,
+} from '@decentralchain/ts-lib-crypto';
 
 const logger = createLogger('Main');
 
 async function main(): Promise<void> {
   logger.info('═══════════════════════════════════════════');
-  logger.info('  SOL ⇄ DCC Bridge Validator Node v1.0.0');
+  logger.info('  SOL ⇄ DCC Bridge Validator Node v2.0.0');
+  logger.info('  Phase 1: Committee Minting | Phase 2: ZK Proofs');;
   logger.info('═══════════════════════════════════════════');
 
   // Load configuration
@@ -60,6 +68,20 @@ async function main(): Promise<void> {
     publicKey: signer.getPublicKey().toString('hex'),
   });
 
+  // ── Derive DCC signing seed for this validator ──
+  // Each validator gets a unique signing key derived from the base DCC seed
+  // and its node ID. These keys match the Curve25519 signature scheme used
+  // by RIDE's sigVerify(), as opposed to Ed25519 (tweetnacl).
+  const dccSigningSeed = `${config.dccSeed}:bridge-signer:${config.nodeId}`;
+  const dccSigningPubKeyB58 = dccPublicKey(dccSigningSeed);
+  const dccSigningPubKeyRaw = Buffer.from(dccBase58Decode(dccSigningPubKeyB58));
+
+  logger.info('DCC signing key derived', {
+    nodeId: config.nodeId,
+    publicKeyHex: dccSigningPubKeyRaw.toString('hex'),
+    publicKeyB58: dccSigningPubKeyB58,
+  });
+
   // ── Initialize Consensus Engine ──
   const consensus = new ConsensusEngine(
     {
@@ -68,9 +90,50 @@ async function main(): Promise<void> {
       consensusTimeoutMs: config.consensusTimeoutMs,
       maxRetries: config.maxRetries,
     },
-    (message: Buffer) => signer.sign(message),
-    () => signer.getPublicKey(),
+    // DCC-compatible signing: use Curve25519 scheme that matches RIDE sigVerify
+    async (message: Buffer): Promise<Buffer> => {
+      const sigB58: string = dccSignBytes(dccSigningSeed, message) as unknown as string;
+      return Buffer.from(dccBase58Decode(sigB58));
+    },
+    () => dccSigningPubKeyRaw,
   );
+
+  // ── Initialize ZK Bridge Service (Phase 2) ──
+  const zkVerifierContract = process.env.DCC_ZK_VERIFIER_CONTRACT || '';
+  let zkService: ZkBridgeService | null = null;
+
+  if (zkVerifierContract) {
+    const zkWasmPath = process.env.ZK_WASM_PATH || 'zk/circuits/build/bridge_deposit_js/bridge_deposit.wasm';
+    const zkZkeyPath = process.env.ZK_ZKEY_PATH || 'zk/circuits/build/bridge_deposit_final.zkey';
+    const zkVkeyPath = process.env.ZK_VKEY_PATH || 'zk/circuits/build/verification_key.json';
+
+    zkService = new ZkBridgeService({
+      zkVerifierContract,
+      bridgeCoreContract: config.dccBridgeContract,
+      nodeUrl: config.dccNodeUrl,
+      chainId: config.dccChainIdChar,
+      dccSeed: config.dccSeed,
+      nodeId: config.nodeId,
+      apiKey: process.env.DCC_API_KEY || '',
+      wasmPath: zkWasmPath,
+      zkeyPath: zkZkeyPath,
+      vkeyPath: zkVkeyPath,
+      solanaProgramId: config.solanaProgramId,
+      checkpointWindowMs: parseInt(process.env.ZK_CHECKPOINT_WINDOW_MS || '60000'),
+      maxEventsPerCheckpoint: parseInt(process.env.ZK_MAX_EVENTS_PER_CHECKPOINT || '100'),
+    });
+
+    zkService.on('zk_mint_success', (info) => {
+      logger.info('ZK mint successful!', info);
+    });
+
+    logger.info('ZK Bridge Service configured', {
+      zkVerifier: zkVerifierContract,
+      wasmPath: zkWasmPath,
+    });
+  } else {
+    logger.info('ZK Bridge Service DISABLED — set DCC_ZK_VERIFIER_CONTRACT to enable');
+  }
 
   // ── Initialize Solana Watcher ──
   const solanaWatcher = new SolanaWatcher({
@@ -178,12 +241,43 @@ async function main(): Promise<void> {
       return;
     }
 
-    consensus.proposeAttestation({
-      type: 'mint',
-      transferId: event.transferId,
-      event,
-      timestamp: Date.now(),
-    });
+    // Amount-based routing: ≥100 SOL → ZK proof required, <100 SOL → committee fast-path only
+    const ZK_ONLY_THRESHOLD = BigInt(process.env.ZK_ONLY_THRESHOLD_LAMPORTS || '100000000000'); // 100 SOL
+    const useZk = amountBigint >= ZK_ONLY_THRESHOLD;
+
+    if (!useZk) {
+      // Under 100 SOL: committee fast-path (no ZK proof needed)
+      logger.info('Small deposit → committee-only path (ZK skipped)', {
+        transferId: event.transferId,
+        amount: amountBigint.toString(),
+        threshold: ZK_ONLY_THRESHOLD.toString(),
+      });
+      consensus.proposeAttestation({
+        type: 'mint',
+        transferId: event.transferId,
+        event,
+        timestamp: Date.now(),
+      });
+    } else {
+      // 100+ SOL: ZK-only path (committee skipped, proof required)
+      logger.info('Large deposit → ZK-only path (committee skipped)', {
+        transferId: event.transferId,
+        amount: amountBigint.toString(),
+        threshold: ZK_ONLY_THRESHOLD.toString(),
+      });
+
+      // Feed deposit to ZK pipeline for proof generation
+      if (zkService) {
+        try {
+          zkService.addDeposit(event);
+        } catch (err) {
+          logger.warn('Failed to add deposit to ZK pipeline', {
+            transferId: event.transferId,
+            error: err,
+          });
+        }
+      }
+    }
   });
 
   // DCC burn finalized → propose unlock attestation
@@ -230,6 +324,15 @@ async function main(): Promise<void> {
     try {
       if (result.type === 'mint') {
         await submitMintToDcc(config, result);
+        // Notify API that committee mint is complete
+        const API_URL = process.env.API_URL || 'http://api:3000';
+        try {
+          await fetch(`${API_URL}/api/v1/transfer/notify-complete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transferId: result.transferId, status: 'completed' }),
+          });
+        } catch {}
       } else {
         await submitUnlockToSolana(config, result);
       }
@@ -308,14 +411,24 @@ async function main(): Promise<void> {
   await dccWatcher.start();
   await p2p.start();
 
+  // Start ZK Bridge Service (Phase 2)
+  if (zkService) {
+    await zkService.start();
+    logger.info('ZK Bridge Service started — Phase 2 active');
+  }
+
   logger.info('Validator node fully operational');
   logger.info(`Public Key: ${signer.getPublicKey().toString('hex')}`);
   logger.info(`P2P: ws://0.0.0.0:${config.p2pPort}`);
   logger.info(`Health: http://localhost:${config.healthCheckPort}/health`);
+  if (zkService) {
+    logger.info(`ZK Verifier: ${process.env.DCC_ZK_VERIFIER_CONTRACT}`);
+  }
 
   // Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down...');
+    if (zkService) await zkService.stop();
     await p2p.stop();
     await solanaWatcher.stop();
     await dccWatcher.stop();
@@ -349,13 +462,44 @@ async function submitMintToDcc(
   if (!depositEvent) {
     throw new Error(`No deposit event in consensus result for transfer ${result.transferId}`);
   }
-  const recipient = depositEvent.recipientDcc;
+
+  // Convert hex-encoded DCC recipient to base58 DCC address string
+  // The recipient_dcc is stored as 26 raw bytes (base58-decoded DCC address) + 6 zero-pad bytes
+  const recipientHex = depositEvent.recipientDcc;
+  const recipientRawBytes = Buffer.from(recipientHex, 'hex');
+  // Strip trailing zero-padding to get original base58-decoded bytes
+  let lastNonZero = recipientRawBytes.length - 1;
+  while (lastNonZero > 0 && recipientRawBytes[lastNonZero] === 0) lastNonZero--;
+  const recipientTrimmed = recipientRawBytes.subarray(0, lastNonZero + 1);
+  const bs58Chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  function toBase58(buf: Buffer): string {
+    let num = BigInt('0x' + buf.toString('hex'));
+    let result = '';
+    while (num > 0n) {
+      result = bs58Chars[Number(num % 58n)] + result;
+      num = num / 58n;
+    }
+    // Preserve leading zeros
+    for (let i = 0; i < buf.length && buf[i] === 0; i++) {
+      result = '1' + result;
+    }
+    return result || '1';
+  }
+  const recipient = toBase58(Buffer.from(recipientTrimmed));
   const amount = Number(depositEvent.amount);
   const solSlot = depositEvent.slot;
 
   if (!recipient || amount <= 0) {
     throw new Error(`Invalid deposit event data for transfer ${result.transferId}`);
   }
+
+  logger.info('Resolved DCC recipient address', {
+    transferId: result.transferId,
+    recipientHex: recipientHex.slice(0, 20) + '...',
+    recipientDcc: recipient,
+    amount,
+    solSlot,
+  });
 
   try {
     // Sign and broadcast via @decentralchain/decentralchain-transactions

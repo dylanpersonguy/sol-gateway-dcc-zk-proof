@@ -66,7 +66,7 @@ async function main() {
   const clusterUrls: Record<string, string> = {
     localnet: "http://127.0.0.1:8899",
     devnet: "https://api.devnet.solana.com",
-    mainnet: "https://api.mainnet-beta.solana.com",
+    mainnet: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
   };
   const rpcUrl = clusterUrls[args.network];
   if (!rpcUrl) throw new Error(`Unknown network: ${args.network}`);
@@ -124,8 +124,9 @@ async function main() {
       requiredConfirmations: args.requiredConfirmations,
       largeWithdrawalDelay: new anchor.BN(3600),
       largeWithdrawalThreshold: new anchor.BN(args.maxDeposit),
-      dccChainId: 87,
+      dccChainId: 63,
       solanaChainId: 1,
+      resumeDelaySeconds: new anchor.BN(300), // 5-minute timelock for resume
     })
     .accountsPartial({
       authority: keypair.publicKey,

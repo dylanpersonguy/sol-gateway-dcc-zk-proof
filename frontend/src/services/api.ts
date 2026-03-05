@@ -25,6 +25,24 @@ class BridgeApi {
     return data;
   }
 
+  async registerTransfer(params: {
+    transferId: string;
+    sender: string;
+    recipient: string;
+    amount: string;
+    amountFormatted?: string;
+    splMint?: string;
+    sourceTxHash?: string;
+    direction: 'sol_to_dcc' | 'dcc_to_sol';
+  }) {
+    try {
+      const { data } = await this.client.post('/transfer/register', params);
+      return data;
+    } catch {
+      // Non-critical — status polling still works via on-chain checks
+    }
+  }
+
   async createRedeem(params: {
     sender: string;
     solRecipient: string;

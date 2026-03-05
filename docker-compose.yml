@@ -11,8 +11,8 @@ x-logging: &default-logging
 
 x-validator-common: &validator-common
   build:
-    context: ./validator
-    dockerfile: Dockerfile
+    context: .
+    dockerfile: validator/Dockerfile
   env_file: .env
   restart: unless-stopped
   networks:
@@ -21,8 +21,8 @@ x-validator-common: &validator-common
   deploy:
     resources:
       limits:
-        memory: 1G
-        cpus: "1.0"
+        memory: 8G
+        cpus: "2.0"
       reservations:
         memory: 256M
 
@@ -30,43 +30,61 @@ services:
   # ── Validator Node ─────────────────────────────────────────
   validator-1:
     <<: *validator-common
+    deploy:
+      resources:
+        limits:
+          memory: 12G
+          cpus: "4.0"
+        reservations:
+          memory: 512M
     environment:
       VALIDATOR_NODE_ID: validator-1
       P2P_PORT: "9000"
       HEALTH_CHECK_PORT: "8080"
       METRICS_PORT: "9090"
+      ZK_PROOF_GENERATION_ENABLED: "true"
     ports:
       - "9000:9000"   # P2P
       - "8080:8080"   # Health
       - "9090:9090"   # Metrics
     volumes:
       - validator-1-data:/app/data
+      - ./zk/circuits/build:/app/zk/circuits/build:ro
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      interval: 60s
+      timeout: 30s
+      retries: 10
       start_period: 30s
 
   validator-2:
     <<: *validator-common
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
     environment:
       VALIDATOR_NODE_ID: validator-2
       P2P_PORT: "9001"
       HEALTH_CHECK_PORT: "8081"
       METRICS_PORT: "9091"
       BOOTSTRAP_PEERS: "validator-1:9000"
+      ZK_PROOF_GENERATION_ENABLED: "false"
     ports:
       - "9001:9001"
       - "8081:8081"
       - "9091:9091"
     volumes:
       - validator-2-data:/app/data
+      - ./zk/circuits/build:/app/zk/circuits/build:ro
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      interval: 60s
+      timeout: 30s
+      retries: 10
       start_period: 30s
     depends_on:
       validator-1:
@@ -74,23 +92,32 @@ services:
 
   validator-3:
     <<: *validator-common
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
     environment:
       VALIDATOR_NODE_ID: validator-3
       P2P_PORT: "9002"
       HEALTH_CHECK_PORT: "8082"
       METRICS_PORT: "9092"
       BOOTSTRAP_PEERS: "validator-1:9000,validator-2:9001"
+      ZK_PROOF_GENERATION_ENABLED: "false"
     ports:
       - "9002:9002"
       - "8082:8082"
       - "9092:9092"
     volumes:
       - validator-3-data:/app/data
+      - ./zk/circuits/build:/app/zk/circuits/build:ro
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8082/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      interval: 60s
+      timeout: 30s
+      retries: 10
       start_period: 30s
     depends_on:
       validator-1:
@@ -101,14 +128,17 @@ services:
   # ── API Server ─────────────────────────────────────────────
   api:
     build:
-      context: ./api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: api/Dockerfile
     env_file: .env
     environment:
       API_PORT: "3000"
       NODE_ENV: production
+      API_DB_PATH: /app/data/api-transfers.db
     ports:
       - "3000:3000"
+    volumes:
+      - api-data:/app/data
     restart: unless-stopped
     networks:
       - bridge-net
@@ -119,7 +149,7 @@ services:
           memory: 512M
           cpus: "0.5"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -131,8 +161,8 @@ services:
   # ── Monitor ────────────────────────────────────────────────
   monitor:
     build:
-      context: ./monitoring
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: monitoring/Dockerfile
     env_file: .env
     environment:
       MONITOR_PORT: "9095"
@@ -195,6 +225,7 @@ volumes:
   validator-3-data:
   prometheus-data:
   grafana-data:
+  api-data:
 
 networks:
   bridge-net:

@@ -17,7 +17,7 @@ import { Logger } from 'winston';
 import { createLogger } from '../utils/logger';
 import { SolanaDepositEvent } from '../watchers/solana-watcher';
 import { DccBurnEvent } from '../watchers/dcc-watcher';
-import * as nacl from 'tweetnacl';
+import { verifySignature as dccVerifySignature } from '@decentralchain/ts-lib-crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -234,15 +234,15 @@ export class ConsensusEngine extends EventEmitter {
       return;
     }
 
-    // ── GUARD: Ed25519 signature verification (H-1 fix) ──
+    // ── GUARD: DCC Curve25519 signature verification (H-1 fix) ──
     try {
-      const isValid = nacl.sign.detached.verify(
+      const isValid = dccVerifySignature(
+        new Uint8Array(attestation.publicKey),
         new Uint8Array(attestation.messageHash),
         new Uint8Array(attestation.signature),
-        new Uint8Array(attestation.publicKey),
       );
       if (!isValid) {
-        this.logger.error('REJECTING attestation with INVALID Ed25519 signature', {
+        this.logger.error('REJECTING attestation with INVALID signature', {
           transferId,
           nodeId,
           publicKey: pubkeyHex,
@@ -395,49 +395,35 @@ export class ConsensusEngine extends EventEmitter {
   /**
    * Construct the canonical mint attestation message.
    * Used for SOL→DCC deposits triggering wSOL minting on DCC.
+   *
+   * MUST match RIDE contract's committeeMint signature verification:
+   *   toBytes(transferId + "|" + recipient + "|" + amount + "|" + solSlot)
+   * where recipient is the base58 DCC address derived from the raw bytes.
    */
   private constructMintMessage(request: AttestationRequest): Buffer {
-    const parts: Buffer[] = [];
-
-    // Domain separator for mint attestation
-    parts.push(Buffer.from('SOL_DCC_BRIDGE_V1_MINT'));
-
-    // Transfer ID (raw 32 bytes)
-    const transferIdBuf = Buffer.alloc(32);
-    const tidHex = Buffer.from(request.transferId, 'hex');
-    tidHex.copy(transferIdBuf, 0, 0, Math.min(32, tidHex.length));
-    parts.push(transferIdBuf);
-
     const event = request.event as SolanaDepositEvent;
 
-    // Sender (32 bytes raw pubkey)
-    const senderBuf = Buffer.alloc(32);
-    const senderBytes = Buffer.from(event.sender, 'hex');
-    senderBytes.copy(senderBuf, 0, 0, Math.min(32, senderBytes.length));
-    parts.push(senderBuf);
+    // Convert hex recipient to base58 DCC address
+    const recipientRaw = Buffer.from(event.recipientDcc, 'hex');
+    let lastNonZero = recipientRaw.length - 1;
+    while (lastNonZero > 0 && recipientRaw[lastNonZero] === 0) lastNonZero--;
+    const trimmed = recipientRaw.subarray(0, lastNonZero + 1);
+    const bs58Chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    let num = BigInt('0x' + Buffer.from(trimmed).toString('hex'));
+    let b58 = '';
+    while (num > 0n) {
+      b58 = bs58Chars[Number(num % 58n)] + b58;
+      num = num / 58n;
+    }
+    for (let j = 0; j < trimmed.length && trimmed[j] === 0; j++) {
+      b58 = '1' + b58;
+    }
+    const recipient = b58 || '1';
 
-    // Recipient DCC (32 bytes raw)
-    const recipientBuf = Buffer.alloc(32);
-    const recipientBytes = Buffer.from(event.recipientDcc, 'hex');
-    recipientBytes.copy(recipientBuf, 0, 0, Math.min(32, recipientBytes.length));
-    parts.push(recipientBuf);
-
-    // Amount as u64 LE
-    parts.push(this.bigintToBuffer(event.amount));
-
-    // Nonce as u64 LE
-    parts.push(this.bigintToBuffer(event.nonce));
-
-    // Slot as u64 LE
-    parts.push(this.uint64ToBuffer(event.slot));
-
-    // Chain ID as u32 LE
-    parts.push(this.uint32ToBuffer(event.chainId));
-
-    // Timestamp as u64 LE
-    parts.push(this.uint64ToBuffer(request.timestamp));
-
-    return Buffer.concat(parts);
+    // Canonical message matching RIDE's toBytes(string):
+    // transferId + "|" + recipient + "|" + amount + "|" + solSlot
+    const message = `${request.transferId}|${recipient}|${event.amount.toString()}|${event.slot}`;
+    return Buffer.from(message, 'utf-8');
   }
 
   /**

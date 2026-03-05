@@ -18,6 +18,7 @@ export function getDccConfig() {
   return {
     nodeUrl: process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io',
     bridgeContract: process.env.DCC_BRIDGE_CONTRACT || '',
+    zkVerifierContract: process.env.DCC_ZK_VERIFIER_CONTRACT || '',
     wsolAssetId: process.env.SOL_ASSET_ID || process.env.WSOL_ASSET_ID || '',
     chainIdChar: process.env.DCC_CHAIN_ID_CHAR || '?',
   };
@@ -100,6 +101,51 @@ export async function isTransferProcessed(
     const entry = await nodeInteraction.accountDataByKey(
       `processed_${transferId}`,
       contractAddress,
+      nodeUrl,
+    );
+    return entry?.value === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check whether a transfer has been ZK-processed on the ZK verifier contract.
+ * ZK deposits store `zk_processed_<base58MessageId>` on the verifier.
+ * We look up the deposit PDA on Solana to get the message_id bytes,
+ * then query the ZK verifier contract for `zk_processed_<messageIdBase58>`.
+ */
+export async function isZkProcessed(
+  zkVerifierAddress: string,
+  transferId: string,
+  nodeUrl: string,
+): Promise<boolean> {
+  try {
+    // Look up deposit PDA on Solana to get the on-chain message_id
+    const { Connection, PublicKey } = require('@solana/web3.js');
+    const bs58 = require('bs58');
+    const solRpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+    const programId = new PublicKey(process.env.SOLANA_PROGRAM_ID || '9yJDb6VyjDHmQC7DLADDdLFm9wxWanXRM5x9SdZ3oVkF');
+    const connection = new Connection(solRpcUrl, 'confirmed');
+
+    const tidBytes = Buffer.from(transferId, 'hex');
+    const [depositPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('deposit'), tidBytes],
+      programId,
+    );
+
+    const accountInfo = await connection.getAccountInfo(depositPda, 'confirmed');
+    if (!accountInfo || accountInfo.data.length < 72) return false;
+
+    // message_id is at bytes 40-72 in the deposit record
+    const messageIdBytes = accountInfo.data.subarray(40, 72);
+    const messageIdBase58 = bs58.default
+      ? bs58.default.encode(messageIdBytes)
+      : bs58.encode(messageIdBytes);
+
+    const entry = await nodeInteraction.accountDataByKey(
+      `zk_processed_${messageIdBase58}`,
+      zkVerifierAddress,
       nodeUrl,
     );
     return entry?.value === true;
