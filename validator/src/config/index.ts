@@ -71,6 +71,14 @@ export interface ValidatorConfig {
   zkVkeyPath: string;
   zkCheckpointWindowMs: number;
   zkMaxEventsPerCheckpoint: number;
+
+  // ── Beta Safety Caps ──
+  /** Threshold in lamports above which ZK proof is REQUIRED (committee alone rejected) */
+  zkOnlyThresholdLamports: bigint;
+  /** Kill switch: if true, ZK proof path is completely disabled */
+  disableZkPath: boolean;
+  /** If true, block startup unless all RELEASE_GUARD prerequisites are met */
+  fullProduction: boolean;
 }
 
 export function loadConfig(): ValidatorConfig {
@@ -130,6 +138,11 @@ export function loadConfig(): ValidatorConfig {
     zkVkeyPath: process.env.ZK_VKEY_PATH || 'zk/circuits/build/verification_key.json',
     zkCheckpointWindowMs: parseInt(process.env.ZK_CHECKPOINT_WINDOW_MS || '60000'),
     zkMaxEventsPerCheckpoint: parseInt(process.env.ZK_MAX_EVENTS_PER_CHECKPOINT || '100'),
+
+    // Beta Safety Caps
+    zkOnlyThresholdLamports: BigInt(process.env.ZK_ONLY_THRESHOLD_LAMPORTS || '0'),
+    disableZkPath: process.env.DISABLE_ZK_PATH === 'true',
+    fullProduction: process.env.FULL_PRODUCTION === 'true',
   };
 }
 

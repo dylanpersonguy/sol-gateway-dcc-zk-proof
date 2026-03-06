@@ -56,6 +56,59 @@ async function main(): Promise<void> {
   const config = loadConfig();
   logger.info('Configuration loaded', { nodeId: config.nodeId });
 
+  // ── Beta Safety: Config Summary ──
+  logger.info('═══════════════════════════════════════════');
+  logger.info('  CONFIGURATION SUMMARY');
+  logger.info('═══════════════════════════════════════════');
+  logger.info(`  Mode:               ${config.fullProduction ? 'FULL_PRODUCTION' : 'LIMITED_BETA'}`);
+  logger.info(`  ZK Path:            ${config.disableZkPath ? 'DISABLED' : 'ENABLED'}`);
+  logger.info(`  ZK-Only Threshold:  ${config.zkOnlyThresholdLamports} lamports`);
+  logger.info(`  Max Single TX:      ${config.maxSingleTxLamports} lamports`);
+  logger.info(`  Max Daily Outflow:  ${config.maxDailyOutflowLamports} lamports`);
+  logger.info(`  Min Deposit:        ${config.minDepositLamports} lamports`);
+  logger.info(`  Min Validators:     ${config.minValidators}`);
+  logger.info(`  Solana Confirms:    ${config.solanaRequiredConfirmations}`);
+  logger.info(`  DCC Confirms:       ${config.dccRequiredConfirmations}`);
+  logger.info('═══════════════════════════════════════════');
+
+  // ── Beta Safety: ZK_ONLY_THRESHOLD validation ──
+  if (config.zkOnlyThresholdLamports > 0n) {
+    if (config.zkOnlyThresholdLamports > config.maxSingleTxLamports) {
+      logger.error('ZK_ONLY_THRESHOLD_LAMPORTS exceeds MAX_SINGLE_TX — ZK enforcement would never trigger');
+      process.exit(1);
+    }
+    logger.info('ZK-only enforcement active: deposits >= ' +
+      config.zkOnlyThresholdLamports.toString() + ' lamports require ZK proof');
+  }
+
+  // ── Beta Safety: DISABLE_ZK_PATH kill switch ──
+  if (config.disableZkPath) {
+    logger.warn('⚠️  ZK proof path is DISABLED via DISABLE_ZK_PATH=true');
+    logger.warn('    Committee-only minting will be used for all deposits');
+  }
+
+  // ── RELEASE_GUARD: Runtime enforcement for FULL_PRODUCTION mode ──
+  if (config.fullProduction) {
+    const missing: string[] = [];
+    if (!process.env.MPC_CEREMONY_ATTESTATION_HASH) missing.push('MPC_CEREMONY_ATTESTATION_HASH');
+    if (process.env.MULTISIG_AUTHORITY_ENABLED !== 'true') missing.push('MULTISIG_AUTHORITY_ENABLED=true');
+    if (process.env.EXTERNAL_AUDIT_COMPLETED !== 'true') missing.push('EXTERNAL_AUDIT_COMPLETED=true');
+    if (!process.env.HSM_ENABLED || process.env.HSM_ENABLED !== 'true') missing.push('HSM_ENABLED=true');
+
+    if (missing.length > 0) {
+      logger.error('═══════════════════════════════════════════');
+      logger.error('  RELEASE_GUARD FAILURE — Cannot start in FULL_PRODUCTION mode');
+      logger.error('  Missing prerequisites:');
+      for (const m of missing) {
+        logger.error('    ✗ ' + m);
+      }
+      logger.error('  See docs/RELEASE_GUARD.md for details');
+      logger.error('═══════════════════════════════════════════');
+      process.exit(1);
+    }
+    logger.info('RELEASE_GUARD: All prerequisites met for FULL_PRODUCTION mode');
+  }
+
   // ── Initialize Threshold Signer ──
   const signer = new ThresholdSigner({
     privateKeyPath: config.privateKeyPath,
