@@ -15,6 +15,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import axios from 'axios';
 import winston from 'winston';
 import dotenv from 'dotenv';
+import { Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 
 dotenv.config();
 
@@ -112,6 +113,18 @@ export class ReconciliationDaemon {
   private running = false;
   private timer: ReturnType<typeof setInterval> | null = null;
 
+  // ── Prometheus Metrics ──
+  readonly registry: Registry;
+  private readonly mBridgeVaultBalance: Gauge;
+  private readonly mDccOutstanding: Gauge;
+  private readonly mBridgeDivergence: Gauge;
+  private readonly mDccTotalMinted: Gauge;
+  private readonly mDccTotalBurned: Gauge;
+  private readonly mSolTotalLocked: Gauge;
+  private readonly mSolTotalUnlocked: Gauge;
+  private readonly mReconcileDuration: Histogram;
+  private readonly mReconcileStatus: Gauge;
+
   constructor(config: ReconciliationConfig) {
     this.config = config;
     this.connection = new Connection(config.solanaRpcUrl, 'confirmed');
@@ -125,6 +138,57 @@ export class ReconciliationDaemon {
       [Buffer.from('bridge_config')],
       this.programId,
     );
+
+    // ── Initialize Prometheus ──
+    this.registry = new Registry();
+    collectDefaultMetrics({ register: this.registry });
+
+    this.mBridgeVaultBalance = new Gauge({
+      name: 'bridge_vault_balance_lamports',
+      help: 'SOL vault balance in lamports',
+      registers: [this.registry],
+    });
+    this.mDccOutstanding = new Gauge({
+      name: 'dcc_outstanding_wrapped',
+      help: 'DCC outstanding wrapped supply (totalMinted - totalBurned)',
+      registers: [this.registry],
+    });
+    this.mBridgeDivergence = new Gauge({
+      name: 'bridge_divergence_lamports',
+      help: 'Cross-chain divergence in lamports (dccNetSupply - solNetLocked). Positive = danger',
+      registers: [this.registry],
+    });
+    this.mDccTotalMinted = new Gauge({
+      name: 'dcc_total_minted',
+      help: 'Total minted on DCC side',
+      registers: [this.registry],
+    });
+    this.mDccTotalBurned = new Gauge({
+      name: 'dcc_total_burned',
+      help: 'Total burned on DCC side',
+      registers: [this.registry],
+    });
+    this.mSolTotalLocked = new Gauge({
+      name: 'sol_total_locked_lamports',
+      help: 'Total SOL locked in bridge vault',
+      registers: [this.registry],
+    });
+    this.mSolTotalUnlocked = new Gauge({
+      name: 'sol_total_unlocked_lamports',
+      help: 'Total SOL unlocked from bridge vault',
+      registers: [this.registry],
+    });
+    this.mReconcileDuration = new Histogram({
+      name: 'reconcile_cycle_duration_seconds',
+      help: 'Duration of a reconciliation cycle in seconds',
+      buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
+      registers: [this.registry],
+    });
+    this.mReconcileStatus = new Gauge({
+      name: 'reconcile_status',
+      help: 'Last reconciliation status: 0=ok, 1=warn, 2=critical, 3=error',
+      registers: [this.registry],
+    });
   }
 
   async start(): Promise<void> {
@@ -224,6 +288,19 @@ export class ReconciliationDaemon {
 
       const elapsed = Date.now() - startMs;
 
+      // ── Publish Prometheus metrics ──
+      this.mBridgeVaultBalance.set(Number(solanaData.vaultBalance));
+      this.mDccOutstanding.set(Number(dccNetSupply));
+      this.mBridgeDivergence.set(Number(drift));
+      this.mDccTotalMinted.set(Number(dccData.totalMinted));
+      this.mDccTotalBurned.set(Number(dccData.totalBurned));
+      this.mSolTotalLocked.set(Number(solanaData.totalLocked));
+      this.mSolTotalUnlocked.set(Number(solanaData.totalUnlocked));
+      this.mReconcileDuration.observe(elapsed / 1000);
+      this.mReconcileStatus.set(
+        status === 'ok' ? 0 : status === 'warn' ? 1 : 2,
+      );
+
       logger.info('Reconciliation complete', {
         status,
         vaultBalance: solanaData.vaultBalance.toString(),
@@ -262,6 +339,8 @@ export class ReconciliationDaemon {
       };
       this.history.push(snapshot);
       if (this.history.length > 1000) this.history.shift();
+
+      this.mReconcileStatus.set(3); // error
 
       logger.error('Reconciliation error', { error: err.message });
     }
@@ -375,7 +454,7 @@ export class ReconciliationDaemon {
 
 async function main(): Promise<void> {
   logger.info('═══════════════════════════════════════════');
-  logger.info('  Cross-Chain Reconciliation Daemon v1.0.0');
+  logger.info('  Cross-Chain Reconciliation Daemon v2.0.0');
   logger.info('═══════════════════════════════════════════');
 
   const config = loadConfig();
@@ -386,6 +465,35 @@ async function main(): Promise<void> {
   }
 
   const daemon = new ReconciliationDaemon(config);
+
+  // ── Prometheus /metrics endpoint ──
+  const metricsPort = parseInt(process.env.RECONCILE_METRICS_PORT || '9091', 10);
+  const app = (await import('express')).default();
+
+  app.get('/metrics', async (_req: any, res: any) => {
+    try {
+      res.set('Content-Type', daemon.registry.contentType);
+      res.end(await daemon.registry.metrics());
+    } catch (err: any) {
+      res.status(500).end(err.message);
+    }
+  });
+
+  app.get('/health', (_req: any, res: any) => {
+    const latest = daemon.getLatest();
+    if (!latest) {
+      res.status(503).json({ status: 'starting' });
+    } else if (latest.status === 'critical') {
+      res.status(500).json({ status: 'critical', drift: latest.drift.toString() });
+    } else {
+      res.json({ status: latest.status, drift: latest.drift.toString() });
+    }
+  });
+
+  app.listen(metricsPort, () => {
+    logger.info(`Prometheus metrics available at http://0.0.0.0:${metricsPort}/metrics`);
+    logger.info(`Health check available at http://0.0.0.0:${metricsPort}/health`);
+  });
 
   // Graceful shutdown
   process.on('SIGINT', () => { daemon.stop(); process.exit(0); });
