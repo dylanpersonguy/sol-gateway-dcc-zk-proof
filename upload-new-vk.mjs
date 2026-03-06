@@ -6,10 +6,15 @@ import axios from 'axios';
 import { invokeScript, libs } from '@decentralchain/decentralchain-transactions';
 import jsSha3 from 'js-sha3';
 
-const NODE = 'https://mainnet-node.decentralchain.io';
-const API_KEY = '***REDACTED_API_KEY***';
-const BASE_SEED = '***REDACTED_SEED_PHRASE***';
-const CHAIN_ID = 63;
+import dotenv from 'dotenv';
+dotenv.config();
+
+function required(name) { const v = process.env[name]; if (!v) { console.error(`Missing env var: ${name}`); process.exit(1); } return v; }
+
+const NODE = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
+const API_KEY = required('DCC_API_KEY');
+const BASE_SEED = required('DCC_VALIDATOR_SEED');
+const CHAIN_ID = Number(process.env.DCC_CHAIN_ID) || 63;
 
 const { seedWithNonce, address, publicKey, privateKey } = libs.crypto;
 const B_SEED = seedWithNonce(BASE_SEED, 2);

@@ -4,7 +4,7 @@ async function testCompile(name, path) {
   const code = fs.readFileSync(path, "utf8");
   const r = await fetch("https://mainnet-node.decentralchain.io/utils/script/compileCode", {
     method: "POST",
-    headers: { "Content-Type": "text/plain", "X-API-Key": "***REDACTED_API_KEY***" },
+    headers: { "Content-Type": "text/plain", "X-API-Key": process.env.DCC_API_KEY || "" },
     body: code,
   });
   const d = await r.json();

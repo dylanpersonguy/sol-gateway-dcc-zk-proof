@@ -17,6 +17,8 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import path from 'path';
+import swaggerUi from 'swagger-ui-express';
+import swaggerDocument from './swagger.json';
 import { depositRouter } from './routes/deposit';
 import { transferRouter } from './routes/transfer';
 import { redeemRouter } from './routes/redeem';
@@ -78,6 +80,10 @@ async function main(): Promise<void> {
   app.use(requestLogger);
 
   // ── Routes ──
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument, {
+    customCss: '.swagger-ui .topbar { display: none }',
+    customSiteTitle: 'SOL ⇄ DCC Bridge API Docs',
+  }));
   app.use('/api/v1/deposit', depositLimiter, depositRouter);
   app.use('/api/v1/transfer', transferRouter);
   app.use('/api/v1/redeem', depositLimiter, redeemRouter);
@@ -93,6 +99,7 @@ async function main(): Promise<void> {
   app.listen(PORT, () => {
     logger.info(`Bridge API server running on port ${PORT}`);
     logger.info('Endpoints:');
+    logger.info(`  📚 /api/docs             — Swagger UI (interactive docs)`);
     logger.info(`  POST /api/v1/deposit     — Generate deposit instruction`);
     logger.info(`  POST /api/v1/deposit/spl — Generate SPL deposit instruction`);
     logger.info(`  GET  /api/v1/transfer/:id — Get transfer status`);

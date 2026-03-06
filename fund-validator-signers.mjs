@@ -4,11 +4,16 @@
 import { transfer, libs, waitForTx, nodeInteraction } from '@decentralchain/decentralchain-transactions';
 import axios from 'axios';
 
+import dotenv from 'dotenv';
+dotenv.config();
+
+function required(name) { const v = process.env[name]; if (!v) { console.error(`Missing env var: ${name}`); process.exit(1); } return v; }
+
 const { address, publicKey, seedWithNonce, privateKey } = libs.crypto;
-const BASE_SEED = '***REDACTED_SEED_PHRASE***';
-const CHAIN_ID = 63;
-const NODE = 'https://mainnet-node.decentralchain.io';
-const API_KEY = '***REDACTED_API_KEY***';
+const BASE_SEED = required('DCC_VALIDATOR_SEED');
+const CHAIN_ID = Number(process.env.DCC_CHAIN_ID) || 63;
+const NODE = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
+const API_KEY = required('DCC_API_KEY');
 
 // Funder: nonce 0 (deployer) — this is a smart account, needs min 500000 fee
 const FUND_SEED = seedWithNonce(BASE_SEED, 0);
