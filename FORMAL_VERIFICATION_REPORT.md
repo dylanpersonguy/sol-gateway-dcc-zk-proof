@@ -1,772 +1,907 @@
-# Formal Verification Report — SOL ↔ DCC ZK Bridge
+# FORMAL VERIFICATION REPORT
 
-**Date:** 2025-01-28  
-**Scope:** Full state-machine analysis of the SOL ↔ DCC cross-chain bridge  
-**Methodology:** Manual formal verification treating the protocol as a state machine, with property-based testing (40,000 randomized operations across 4 simulation runs)  
-**Report Specification:** prompt2.md — Steps 1–7
+## SOL-Gateway-DCC ZK Bridge — Protocol Invariant Analysis
+
+**Date:** March 5, 2026  
+**Scope:** Full cross-chain state machine: Solana programs, DCC RIDE contracts, ZK circuits, validator consensus  
+**Method:** Manual formal verification — state extraction, transition modeling, invariant checking, symbolic attack analysis  
+**Classification:** 1 NEW INVARIANT VIOLATION FOUND (Serialization Mismatch), 7/8 invariants HOLD under stated assumptions
 
 ---
 
-## Table of Contents
+## TABLE OF CONTENTS
 
-1. [State Variable Inventory](#1-state-variable-inventory)
-2. [State Transition Model](#2-state-transition-model)
-3. [Security Invariant Verification](#3-security-invariant-verification)
+1. [System State Model](#1-system-state-model)
+2. [State Transitions](#2-state-transitions)
+3. [Invariant Verification](#3-invariant-verification)
 4. [Edge Case Analysis](#4-edge-case-analysis)
 5. [Symbolic Attack Analysis](#5-symbolic-attack-analysis)
-6. [Serialization Consistency Verification](#6-serialization-consistency-verification)
-7. [Property-Based Test Results](#7-property-based-test-results)
-8. [Findings & Recommendations](#8-findings--recommendations)
-9. [Conclusion](#9-conclusion)
+6. [Serialization Consistency](#6-serialization-consistency)
+7. [Property-Based Tests](#7-property-based-tests)
+8. [Findings & Required Fixes](#8-findings--required-fixes)
+9. [Assumptions](#9-assumptions)
+10. [Additional Invariants](#10-additional-invariants)
 
 ---
 
-## 1. State Variable Inventory
+## 1. SYSTEM STATE MODEL
 
-All persistent state is catalogued below. The system spans **three runtime environments** (Solana/Anchor, DCC/RIDE v6, off-chain ZK prover) plus a Circom circuit.
+### 1.1 Solana — Bridge Vault (`sol-bridge-lock`)
 
-### 1.1 Solana — Bridge Lock Program
+#### BridgeConfig (PDA: `[b"bridge_config"]`)
 
-| Account (PDA) | Seed(s) | Field | Type | Purpose |
-|---|---|---|---|---|
-| **BridgeConfig** | `[b"bridge_config"]` | `authority` | `Pubkey` | Admin multisig |
-| | | `guardian` | `Pubkey` | Emergency-pause authority |
-| | | `paused` | `bool` | Global pause flag |
-| | | `global_nonce` | `u64` | Monotonic operation counter |
-| | | `total_locked` | `u64` | Cumulative SOL deposited (lamports) |
-| | | `total_unlocked` | `u64` | Cumulative SOL released (lamports) |
-| | | `validator_count` | `u8` | Active validator count |
-| | | `min_validators` | `u8` | Minimum for M-of-N attestation |
-| | | `max_validators` | `u8` | Maximum validator slots |
-| | | `min_deposit` | `u64` | Floor per deposit |
-| | | `max_deposit` | `u64` | Ceiling per deposit |
-| | | `max_daily_outflow` | `u64` | Circuit breaker — daily cap |
-| | | `current_daily_outflow` | `u64` | Rolling daily unlock sum |
-| | | `last_daily_reset` | `i64` | Timestamp of last reset |
-| | | `max_unlock_amount` | `u64` | Per-unlock ceiling |
-| | | `required_confirmations` | `u16` | Finality depth (unused in current flow) |
-| | | `large_withdrawal_delay` | `i64` | Seconds delay for large unlocks |
-| | | `large_withdrawal_threshold` | `u64` | Threshold that triggers delay |
-| | | `dcc_chain_id` | `u32` | Domain-separation parameter |
-| | | `solana_chain_id` | `u32` | Domain-separation parameter |
-| | | `bump`, `vault_bump` | `u8` | PDA bump seeds |
-| **DepositRecord** | `[b"deposit", transfer_id]` | `transfer_id` | `[u8;32]` | Hash(sender, nonce) |
-| | | `message_id` | `[u8;32]` | Keccak256 of 181-byte preimage |
-| | | `sender` | `Pubkey` | Depositor |
-| | | `recipient_dcc` | `[u8;32]` | DCC destination |
-| | | `amount` | `u64` | Lamports deposited |
-| | | `nonce` | `u64` | Per-user nonce at time of deposit |
-| | | `slot` | `u64` | Solana slot |
-| | | `event_index` | `u32` | Index within checkpoint window |
-| | | `asset_id` | `Pubkey` | Token mint (wSOL for SOL) |
-| | | `processed` | `bool` | Set true after DCC-side mint |
-| | | `timestamp` | `i64` | Unix timestamp |
-| **UnlockRecord** | `[b"unlock", transfer_id]` | `transfer_id` | `[u8;32]` | From DCC burn event |
-| | | `recipient` | `Pubkey` | SOL recipient |
-| | | `amount` | `u64` | Lamports to release |
-| | | `burn_tx_hash` | `[u8;32]` | DCC burn tx for audit trail |
-| | | `executed` | `bool` | Whether funds released |
-| | | `scheduled_time` | `i64` | For time-locked large unlocks |
-| **UserState** | `[b"user_state", pubkey]` | `next_nonce` | `u64` | Monotonic per-user nonce |
-| | | `total_deposited` | `u64` | Lifetime deposit sum |
-| **ValidatorEntry** | `[b"validator", pubkey]` | `active` | `bool` | Validator status |
-| | | `attestation_count` | `u64` | Successful attestations |
-| | | `fault_count` | `u64` | Fault counter (slashing basis) |
+| Variable | Type | Security Role |
+|----------|------|---------------|
+| `authority` | Pubkey | Controls config updates |
+| `guardian` | Pubkey | Emergency pause authority |
+| `paused` | bool | Global kill switch — blocks deposits and unlocks |
+| `global_nonce` | u64 | Monotonic counter — used for event_index on deposit |
+| `total_locked` | u64 | Cumulative SOL locked (lamports) — incremented on deposit, decremented on unlock |
+| `total_unlocked` | u64 | Cumulative SOL unlocked (lamports) |
+| `validator_count` | u8 | Number of registered validators |
+| `min_validators` | u8 | Minimum signatures required for unlock (enforced ≥ 3) |
+| `max_validators` | u8 | Maximum validator slots |
+| `min_deposit` / `max_deposit` | u64 | Deposit bounds |
+| `max_daily_outflow` | u64 | Circuit breaker ceiling |
+| `current_daily_outflow` | u64 | Rolling outflow counter (resets per aligned 24h window) |
+| `last_daily_reset` | i64 | Timestamp of last window boundary |
+| `max_unlock_amount` | u64 | Per-tx unlock ceiling |
+| `large_withdrawal_delay` | i64 | Timelock seconds for large unlocks (enforced ≥ 300) |
+| `large_withdrawal_threshold` | u64 | Amount threshold for "large" classification |
+| `dcc_chain_id` / `solana_chain_id` | u32 | Domain separation identifiers |
+| `resume_requested_at` | i64 | 2-phase resume timelock timestamp |
+| `resume_delay_seconds` | i64 | Required delay for resume (≥ 300s) |
+| `pending_authority` | Pubkey | HIGH-3 fix: staged authority change |
+| `authority_transfer_requested_at` | i64 | Timestamp of pending authority proposal |
 
-### 1.2 Solana — Checkpoint Registry
+#### DepositRecord (PDA: `[b"deposit", transfer_id]`)
 
-| Account (PDA) | Seed(s) | Field | Type | Purpose |
-|---|---|---|---|---|
-| **CheckpointConfig** | `[b"checkpoint_config"]` | `authority` | `Pubkey` | Admin authority |
-| | | `guardian` | `Pubkey` | Emergency guardian |
-| | | `paused` | `bool` | Global pause |
-| | | `next_checkpoint_id` | `u64` | Monotonic counter |
-| | | `last_checkpoint_slot` | `u64` | Slot-advancement monotonicity |
-| | | `min_signatures` | `u8` | M-of-N committee threshold |
-| | | `member_count` | `u8` | Committee size |
-| | | `finality_safety_margin` | `u64` | `current_slot >= cp_slot + margin` |
-| | | `timelock_seconds` | `i64` | Pending → Active delay |
-| | | `checkpoint_ttl_slots` | `u64` | TTL before expiry |
-| | | `max_pending` | `u8` | Max concurrent pending |
-| | | `pending_count` | `u8` | Current pending count |
-| | | `bridge_program_id` | `Pubkey` | Verified bridge program |
-| | | `chain_ids` | `[u32; 4]` | Registered chain IDs |
-| **CheckpointEntry** | `[b"checkpoint", id.to_le_bytes()]` | `checkpoint_id` | `u64` | Unique ID |
-| | | `slot` | `u64` | Snapshot Solana slot |
-| | | `commitment_root` | `[u8;32]` | Merkle root |
-| | | `event_count` | `u32` | Events in this epoch |
-| | | `submitted_at` | `i64` | Submission timestamp |
-| | | `activates_at` | `i64` | Timelock expiry |
-| | | `expires_at_slot` | `u64` | Slot-based TTL |
-| | | `status` | `enum{Pending,Active,Expired}` | Lifecycle state |
-| | | `signature_count` | `u8` | Committee signatures collected |
-| **CommitteeMember** | `[b"member", pubkey]` | `pubkey` | `Pubkey` | Member identity |
-| | | `active` | `bool` | Status |
-| | | `registered_at` | `i64` | Join time |
+| Variable | Type | Security Role |
+|----------|------|---------------|
+| `transfer_id` | [u8; 32] | Unique per-deposit identifier (hash of sender ‖ nonce) |
+| `message_id` | [u8; 32] | Keccak256 of canonical preimage — links to ZK circuit |
+| `sender` | Pubkey | Depositor |
+| `recipient_dcc` | [u8; 32] | DCC destination address |
+| `amount` | u64 | Deposit amount in lamports |
+| `nonce` | u64 | Per-user monotonic nonce |
+| `slot` | u64 | Solana slot at deposit time |
+| `event_index` | u64 | Global event counter (LOW-1: widened from u32) |
+| `timestamp` | i64 | Unix timestamp |
+| `asset_id` | Pubkey | SPL mint or native SOL sentinel |
+| `processed` | bool | Whether minted on DCC |
 
-### 1.3 DCC — RIDE Contract (zk_bridge.ride)
+#### UnlockRecord (PDA: `[b"unlock", transfer_id]`)
 
-| State Key Pattern | Type | Purpose |
-|---|---|---|
-| `admin` | `String` | Admin address |
-| `guardian` | `String` | Guardian address |
-| `paused` | `Boolean` | Global pause flag |
-| `wsol_asset_id` | `String` | Wrapped SOL token ID on DCC |
-| `total_minted` | `Int` | Cumulative wSOL minted (8 decimals) |
-| `total_burned` | `Int` | Cumulative wSOL burned (8 decimals) |
-| `global_nonce` | `Int` | Operation counter |
-| `groth16_vk` | `String(base64)` | Immutable Groth16 verifying key |
-| `groth16_vk_set` | `Boolean` | Once true, VK is frozen |
-| `checkpoint_{id}_root` | `String(hex)` | Merkle root for checkpoint |
-| `checkpoint_{id}_slot` | `Int` | Solana slot for checkpoint |
-| `checkpoint_{id}_active` | `Boolean` | Active flag |
-| `checkpoint_{id}_height` | `Int` | DCC block when registered |
-| `next_checkpoint_id` | `Int` | Monotonic counter |
-| `committee_{addr}` | `Boolean` | Committee membership |
-| `committee_size` | `Int` | Current committee size |
-| `approval_threshold` | `Int` | Required approvals T-of-N |
-| `proposal_{id}_root` | `String(hex)` | Proposed checkpoint root |
-| `proposal_{id}_slot` | `Int` | Proposed slot |
-| `proposal_{id}_approvals` | `Int` | Current approval count |
-| `proposal_{id}_approved_{addr}` | `Boolean` | Per-member vote |
-| `proposal_{id}_finalized` | `Boolean` | If T reached |
-| `next_proposal_id` | `Int` | Monotonic counter |
-| `processed_{messageId}` | `Boolean` | ZK-proof replay protection |
-| `burn_{burnId}` | `String` | Burn record (recipient,amount) |
-| `burn_nonce_{addr}` | `Int` | Per-user burn nonce |
-| `hourly_minted` | `Int` | Current-hour mint sum |
-| `hourly_reset_height` | `Int` | Height of last hourly reset |
-| `daily_minted` | `Int` | Current-day mint sum |
-| `daily_reset_height` | `Int` | Height of last daily reset |
-| `pending_large_{msgId}` | `Boolean` | Pending large tx flag |
-| `pending_large_height_{msgId}` | `Int` | Height when queued |
-| `pending_recipient_{msgId}` | `String` | Delayed mint recipient |
-| `pending_amount_{msgId}` | `Int` | Delayed mint amount |
-| `unpause_requested_at` | `Int` | Unpause timelock origin |
+| Variable | Type | Security Role |
+|----------|------|---------------|
+| `transfer_id` | [u8; 32] | From DCC burn event |
+| `recipient` | Pubkey | Solana recipient |
+| `amount` | u64 | Unlock amount |
+| `executed` | bool | Whether SOL has been transferred |
+| `scheduled_time` | i64 | For large withdrawals: earliest execution time |
+| `burn_tx_hash` | [u8; 32] | DCC burn transaction hash |
 
-### 1.4 ZK Circuit (bridge_deposit.circom)
+#### UserState (PDA: `[b"user_state", user_pubkey]`)
 
-| Category | Signal | Bits | Purpose |
-|---|---|---|---|
-| **Public** | `checkpoint_root_lo` | 128 | Low 128 bits of Merkle root |
-| | `checkpoint_root_hi` | 128 | High 128 bits of Merkle root |
-| | `message_id_lo` | 128 | Low 128 bits of message hash |
-| | `message_id_hi` | 128 | High 128 bits of message hash |
-| | `amount` | 64 | Transfer amount (lamports) |
-| | `recipient_lo` | 128 | Low 128 bits of raw recipient |
-| | `recipient_hi` | 128 | High 128 bits of raw recipient |
-| | `version` | 8 | Protocol version (must = 1) |
-| **Private** | `src_chain_id` | 32 | Source chain identifier |
-| | `dst_chain_id` | 32 | Destination chain identifier |
-| | `sender[256]` | 256 | Sender pubkey bits |
-| | `nonce` | 64 | Per-user nonce |
-| | `slot` | 64 | Solana slot |
-| | `event_index` | 32 | Event index |
-| | `asset_id[256]` | 256 | Token mint bits |
-| | `src_program_id[256]` | 256 | Source program ID bits |
-| | `merkle_proof[depth][256]` | depth×256 | Merkle siblings |
-| | `path_indices[depth]` | depth | Binary L/R selectors |
+| Variable | Type | Security Role |
+|----------|------|---------------|
+| `next_nonce` | u64 | Strictly monotonic — guarantees unique transfer_ids |
+| `total_deposited` | u64 | Lifetime deposit counter |
 
----
+#### ValidatorEntry (PDA: `[b"validator", validator_pubkey]`)
 
-## 2. State Transition Model
+| Variable | Type | Security Role |
+|----------|------|---------------|
+| `pubkey` | Pubkey | Signing key |
+| `active` | bool | Whether currently in active set |
 
-The bridge is modelled as a distributed state machine $S = (S_{sol}, S_{dcc}, S_{zk})$ with the following transition set:
+### 1.2 Solana — Checkpoint Registry (`checkpoint_registry`)
 
-### 2.1 Transition Table
+#### CheckpointConfig (PDA: `[b"checkpoint_config"]`)
 
-| ID | Transition | Domain | Preconditions | Effects |
-|---|---|---|---|---|
-| T1 | **Deposit** | Solana | `!paused ∧ min_deposit ≤ amt ≤ max_deposit ∧ valid_recipient` | `vault += amt; total_locked += amt; global_nonce++; emit(DepositRecord)` |
-| T2 | **SubmitCheckpoint** | Solana | `!paused ∧ slot > last_slot + safety_margin ∧ sigs ≥ min_sigs ∧ pending < max_pending` | `checkpoint[id] = (root, Pending, activates_at = now + timelock); next_checkpoint_id++` |
-| T3 | **ActivateCheckpoint** | Solana | `status == Pending ∧ now ≥ activates_at ∧ slot < expires_at_slot` | `status ← Active` |
-| T4 | **ExpireCheckpoint** | Solana | `slot ≥ expires_at_slot` | `status ← Expired; pending_count--` |
-| T5 | **ProposeCheckpoint** | DCC | `!paused ∧ caller ∈ committee` | `proposal[id] = (root, slot, approvals=1)` |
-| T6 | **ApproveCheckpoint** | DCC | `!paused ∧ caller ∈ committee ∧ !already_voted` | `approvals++; if approvals ≥ threshold: activate checkpoint on DCC` |
-| T7 | **VerifyAndMint** | DCC | `!paused ∧ vk_set ∧ !processed(msgId) ∧ checkpoint.active ∧ !expired ∧ groth16Verify(proof) ∧ amt bounds ∧ rate limits ok` | `processed[msgId] = true; total_minted += amt/10; hourly/daily counters += amt` |
-| T7b | **VerifyAndMint (large)** | DCC | Same as T7 + `amt ≥ largeTxThreshold` | `processed[msgId] = true; pending_large[msgId] = true; no immediate mint` |
-| T8 | **ExecutePendingMint** | DCC | `!paused ∧ pending_large[msgId] ∧ height ≥ scheduled + delay` | `total_minted += amt; pending_large[msgId] deleted` |
-| T9 | **Burn** | DCC | `!paused ∧ amt > 0 ∧ balance sufficient` | `total_burned += amt; burn[burnId] created` |
-| T10 | **Unlock** | Solana | `!paused ∧ valid_sigs ≥ min_validators ∧ !executed[txId] ∧ amt ≤ max_unlock ∧ daily_outflow ok ∧ chain_id match` | `vault -= amt; total_unlocked += amt; executed[txId] = true` |
-| T10b | **Unlock (large)** | Solana | Same + `amt ≥ threshold` | Create UnlockRecord with `scheduled_time`; no immediate transfer |
-| T11 | **Pause** | Both | `caller == authority ∨ caller == guardian` | `paused ← true` |
-| T12 | **Resume** (Solana) | Solana | `caller == authority` | `paused ← false` |
-| T12b | **Resume** (DCC) | DCC | `caller == admin ∧ height ≥ unpause_requested + delay` | `paused ← false` |
-| T13 | **CancelPendingMint** | DCC | `caller == admin ∨ caller == guardian` | Delete pending_large entries |
+| Variable | Type | Security Role |
+|----------|------|---------------|
+| `paused` | bool | Blocks checkpoint submissions |
+| `next_checkpoint_id` | u64 | Monotonic checkpoint counter |
+| `last_checkpoint_slot` | u64 | Ordering constraint — new checkpoints must reference later slots |
+| `min_signatures` | u8 | Required committee signatures for checkpoint submission |
+| `timelock_seconds` | i64 | Delay before checkpoint becomes active |
+| `checkpoint_ttl_slots` | u64 | Checkpoint expiry duration |
+| `resume_requested_at` | i64 | MED-2 fix: 2-phase resume |
 
-### 2.2 State Transition Diagram
+#### CheckpointEntry (PDA: `[b"checkpoint", checkpoint_id.to_le_bytes()]`)
 
-```
-Solana Side:
-  ┌─────────────────────────────────────────────┐
-  │            Idle (paused = false)             │
-  │                                              │
-  │   deposit(user, amt)  ──→  DepositRecord     │
-  │   submit_cp(root)     ──→  Checkpoint:Pending│
-  │   activate_cp()       ──→  Checkpoint:Active │
-  │   expire_cp()         ──→  Checkpoint:Expired│
-  │   unlock(txId, sigs)  ──→  UnlockRecord      │
-  │   pause()             ──→  Paused            │
-  └─────────────────────────────────────────────┘
-        │ pause()                  │ resume()
-        ▼                         ▲
-  ┌──────────────┐                │
-  │   Paused     │────────────────┘
-  │ (all tx blocked)
-  └──────────────┘
+| Variable | Type | Security Role |
+|----------|------|---------------|
+| `commitment_root` | [u8; 32] | Merkle root of deposit events |
+| `status` | Pending/Active/Expired | Lifecycle state |
+| `activates_at` | i64 | Timelock expiry time |
+| `expires_at_slot` | u64 | Expiry slot |
+| `signature_count` | u8 | Committee signatures collected |
 
-DCC Side:
-  ┌──────────────────────────────────────────────┐
-  │            Idle (paused = false)              │
-  │                                               │
-  │   propose_cp(root)    ──→ Proposal            │
-  │   approve_cp(id)      ──→ Checkpoint:Active   │
-  │   verifyAndMint(proof) ──→ wSOL minted or     │
-  │                            pending_large       │
-  │   executePending(msgId) ──→ wSOL minted       │
-  │   burn(amt)            ──→ BurnRecord          │
-  │   emergencyPause()     ──→ Paused             │
-  └──────────────────────────────────────────────┘
-```
+### 1.3 DCC — ZK Bridge (`zk_bridge.ride`)
 
-### 2.3 Cross-Chain Message Flow
+| Key Pattern | Type | Security Role |
+|-------------|------|---------------|
+| `admin` | String | Admin address |
+| `guardian` | String | Emergency authority |
+| `paused` | Boolean | Global kill switch |
+| `sol_asset_id` | String | wSOL DCC asset ID |
+| `total_minted` | Integer | Cumulative wrapped tokens minted (DCC 8-decimals) |
+| `total_burned` | Integer | Cumulative wrapped tokens burned |
+| `global_nonce` | Integer | Monotonic counter |
+| `processed_{messageId}` | Boolean | Replay protection — **IMMUTABLE** (no DataTransaction) |
+| `burn_{burnId}` | String | Burn record (sender, recipient, amount, height, timestamp) |
+| `burn_nonce_{address}` | Integer | Per-user burn nonce |
+| `hourly_minted` / `daily_minted` | Integer | Rate limit counters |
+| `hourly_reset_height` / `daily_reset_height` | Integer | Window boundaries |
+| `pending_large_{messageId}` | Boolean | Pending large tx flag |
+| `pending_large_height_{messageId}` | Integer | Queue time for delay |
+| `pending_recipient_{messageId}` | String | Recipient for pending mint |
+| `pending_amount_{messageId}` | Integer | Amount for pending mint |
+| `committee_{addr}` | Boolean | Committee member flag |
+| `committee_size` | Integer | Number of committee members |
+| `approval_threshold` | Integer | Required signature count |
+| `unpause_requested_at` | Integer | 2-phase unpause height |
 
-```
-  Solana deposit → (message_id = Keccak256(181-byte preimage))
-       ↓
-  Off-chain prover builds Merkle tree of deposit events
-       ↓
-  Committee submits checkpoint root (both Solana + DCC)
-       ↓
-  Prover generates Groth16 proof of (message_id ∈ checkpoint_root)
-       ↓
-  DCC verifyAndMint verifies proof → mints wSOL
-       ↓
-  DCC burn → burn_tx_hash logged
-       ↓
-  Validators attest burn on Solana → M-of-N unlock
-```
+### 1.4 DCC — ZK Verifier (`zk_verifier.ride`)
+
+| Key Pattern | Type | Security Role |
+|-------------|------|---------------|
+| `groth16_vk` | Binary | Verifying key — **IMMUTABLE** after first set (HIGH-7 fix) |
+| `groth16_vk_set` | Boolean | Set once, never reset |
+| `bridge_core_address` | String | Contract A address — **IMMUTABLE** after init (HIGH-8 fix) |
+| `checkpoint_{id}_root` | Binary | Merkle root |
+| `checkpoint_{id}_active` | Boolean | Whether checkpoint is usable |
+| `checkpoint_{id}_height` | Integer | Registration height (for freshness) |
+| `zk_processed_{messageId}` | Boolean | ZK-specific replay protection |
+| `proposal_{id}_*` | Various | Checkpoint proposal state |
+| `next_checkpoint_id` | Integer | Monotonic counter |
+
+### 1.5 DCC — Bridge Controller (`bridge_controller.ride`)
+
+| Key Pattern | Type | Security Role |
+|-------------|------|---------------|
+| `processed_{transferId}` | Boolean | Replay protection for committee-signed mints |
+| `total_minted` / `total_burned` | Integer | Global supply counters (HIGH-6 fix) |
+| `token_{splMint}_total_minted` | Integer | Per-token supply counters |
+| `token_{splMint}_total_burned` | Integer | Per-token burn counters |
+| `validator_active_{pubkey}` | Boolean | Validator registry |
+| `validator_count` / `min_validators` | Integer | Validator management |
+| `daily_minted` / `daily_reset_height` | Integer | Rate limit |
+| `pending_large_{transferId}` | Boolean | Large tx delay |
+| `burn_{burnId}` | String | Burn records (VULN-13 fix: checked before write) |
+
+### 1.6 Validator (Off-Chain State)
+
+| Variable | Location | Security Role |
+|----------|----------|---------------|
+| `processedTransfers` | `engine.ts` Set<string> | Local replay dedup (capped at 100K, VAL-10) |
+| `pendingConsensus` | `engine.ts` Map<string, PendingConsensus> | Active consensus rounds |
+| `registeredValidators` | `engine.ts` Set<string> | Whitelist for attestation acceptance |
+| `dailyOutflow` | `rate-limiter.ts` bigint | Disk-persisted daily counter (VAL-3 fix) |
+| `windowStart` | `rate-limiter.ts` number | Window start timestamp |
+| `peers` | `transport.ts` Map | Authenticated peer connections |
 
 ---
 
-## 3. Security Invariant Verification
+## 2. STATE TRANSITIONS
 
-### INV-1: Supply Conservation
-
-> **Statement:** The total wSOL supply on DCC shall never exceed the total SOL locked in the Solana vault.
-
-**Formal:**
-$$\text{dccTotalMinted} - \text{dccTotalBurned} \leq \lfloor \text{totalLocked} - \text{totalUnlocked} \rfloor / 10$$
-
-Note: The `/10` accounts for the 9 → 8 decimal conversion (Solana lamports to DCC's 8-decimal wSOL).
-
-**Verification:**
-
-| Property | Status |
-|---|---|
-| T1 (Deposit): only increments `total_locked`, never `total_minted` | ✅ |
-| T7 (Mint): requires valid ZK proof of specific deposit; mints `amount/10` | ✅ |
-| T8 (ExecutePending): mints amount already rate-limited in T7 | ✅ |
-| T9 (Burn): increments `total_burned`, reducing outstanding supply | ✅ |
-| T10 (Unlock): increments `total_unlocked` only after M-of-N validator attestation | ✅ |
-| Cross-chain atomicity: no single transaction mints AND unlocks | ✅ |
-
-**Holds: YES** — Under the honest-prover assumption (ZK soundness), each mint corresponds to exactly one deposit, and each unlock corresponds to exactly one burn. The division by 10 means DCC supply is strictly ≤ Solana locked in lamport terms.
-
-**Gap identified:** There is no on-chain cross-chain synchronous check. Conservation depends on the ZK circuit's soundness (Groth16 on BN128, ~128-bit security) and the validator attestation scheme's honest-majority assumption. A compromise of both simultaneously could violate this invariant.
-
-### INV-2: Replay Protection
-
-> **Statement:** Each deposit `message_id` can only be used to mint once.
-
-**Formal:** For every `message_id` $m$:
-$$\left|\{t \in \text{mint\_events} : t.\text{messageId} = m \}\right| \leq 1$$
-
-**Verification:**
-
-| Check | Status |
-|---|---|
-| DCC: `isMessageProcessed(messageId)` queried before mint | ✅ |
-| DCC: `processed_{messageId} = true` written atomically with mint | ✅ |
-| DCC: Guard is FIRST check after pause/VK checks | ✅ |
-| `processed_` keys use deterministic message_id from proof public inputs | ✅ |
-| Circuit: message_id derived from Keccak256 of full deposit data | ✅ |
-| Anchor PDA uniqueness: `DepositRecord` PDA per transfer_id | ✅ |
-
-**Holds: YES** — The `processed_` Boolean entry in DCC state is set to `true` before any reissue or transfer occurs. Duplicate calls hit the guard and revert.
-
-### INV-3: Burn-Proof Requirement for Withdrawals
-
-> **Statement:** SOL may only be unlocked from the Solana vault if a corresponding DCC burn is attested by M-of-N validators.
-
-**Verification:**
-
-| Check | Status |
-|---|---|
-| Unlock requires `attestation_signatures` parameter (≥ min_validators) | ✅ |
-| Each signature verified via Ed25519 precompile introspection (SysvarInstructions) | ✅ |
-| Duplicate validator detection (no double-counting) | ✅ |
-| Each validator must be `active = true` | ✅ |
-| Domain-separated message: `"SOL_DCC_BRIDGE_UNLOCK_V1" || fields` | ✅ |
-| UnlockRecord PDA prevents same transfer_id from executing twice | ✅ |
-
-**Holds: YES** — The unlock instruction on Solana cryptographically verifies M-of-N Ed25519 signatures over a domain-separated message before releasing funds. Code comments indicate a Phase 2 plan to replace validators with a ZK burn-proof, but the current M-of-N scheme is sound.
-
-### INV-4: Invalid Proof Rejection
-
-> **Statement:** An invalid ZK proof never causes a state change.
-
-**Verification:**
-
-| Check | Status |
-|---|---|
-| `groth16Verify_8inputs(vk, proof, inputs)` returns Boolean | ✅ |
-| Contract throws ("Invalid proof") before any state writes | ✅ |
-| `processed_` flag is NOT set if verification fails | ✅ |
-| No `@Callable` side effects before verification completes | ✅ |
-| RIDE v6 transaction atomicity: partial writes revert on throw | ✅ |
-
-**Holds: YES** — The RIDE runtime guarantees that a throwing callable function produces zero state changes. The Groth16 verification occurs before any state mutation.
-
-### INV-5: Checkpoint Integrity
-
-> **Statement:** An attacker cannot forge or substitute a checkpoint root.
-
-**Verification:**
-
-| Check | Status |
-|---|---|
-| **Solana side:** Committee M-of-N Ed25519 signatures required for submission | ✅ |
-| **Solana side:** Timelock delay (Pending → Active) allows observation | ✅ |
-| **Solana side:** Slot monotonicity prevents rollback | ✅ |
-| **Solana side:** Finality safety margin prevents reorg-based attacks | ✅ |
-| **DCC side (ATK-5 fix):** Committee-based proposal + T-of-N approval | ✅ |
-| **DCC side:** `approval_threshold ≥ 2`, `committee_size ≥ 3` | ✅ |
-| **DCC side:** Each member can only approve once per proposal | ✅ |
-| **ZK circuit:** Root is a public input verified by Groth16 | ✅ |
-| **ZK circuit:** Merkle proof uses domain-separated hashing (0x00 leaf, 0x01 node) | ✅ |
-
-**Holds: YES** — A T-of-N honest majority among committee members is required on both chains. The ZK circuit additionally proves that the deposit event belongs to the specific root via Merkle inclusion.
-
-### INV-6: Persistence of Replay Protection
-
-> **Statement:** Replay protection survives contract upgrades and restarts.
-
-**Verification:**
-
-| Check | Status |
-|---|---|
-| DCC: `processed_` keys are in persistent account data storage | ✅ |
-| DCC: RIDE v6 contracts persist state across all invocations | ✅ |
-| Solana: PDA accounts persist as long as they have rent-exempt balance | ✅ |
-| Solana: DepositRecord and UnlockRecord PDAs are rent-exempt (Anchor) | ✅ |
-| RIDE contract upgrade: state data survives `SetScript` transactions | ✅ |
-| Solana Anchor upgrade: account data preserved | ✅ |
-
-**Holds: YES** — Both platforms use persistent on-chain storage. Replay-protection data cannot be erased by upgrades (absent malicious admin action removing state keys, which would require governance).
-
-### INV-7: Pause‑Flag Enforcement
-
-> **Statement:** When `paused = true`, no deposit, mint, burn, or unlock can execute.
-
-**Verification:**
-
-| Operation | Guard | Location | Status |
-|---|---|---|---|
-| Deposit (Solana) | `require!(!config.paused)` | deposit.rs:L48 | ✅ |
-| Unlock (Solana) | `require!(!config.paused)` | unlock.rs:L52 | ✅ |
-| SubmitCheckpoint | `require!(!config.paused)` | submit_checkpoint.rs:L50 | ✅ |
-| VerifyAndMint (DCC) | `if (isPaused()) then throw("paused")` | zk_bridge.ride | ✅ |
-| ExecutePending (DCC) | `if (isPaused()) then throw("paused")` | zk_bridge.ride | ✅ |
-| Burn (DCC) | `if (isPaused()) then throw("paused")` | zk_bridge.ride | ✅ |
-| ProposeCheckpoint (DCC) | `if (isPaused()) then throw("paused")` | zk_bridge.ride | ✅ |
-| ApproveCheckpoint (DCC) | `if (isPaused()) then throw("paused")` | zk_bridge.ride | ✅ |
-
-**Asymmetry found:** Solana resume requires only `authority` with no timelock. DCC resume requires `admin` + `unpauseDelayBlocks(100)` timelock. This means a Solana-side attacker who compromises the authority key can instantly resume. Recommendation: add a timelock to Solana resume.
-
-**Holds: YES** — All state-modifying operations check the pause flag as their first guard.
-
-### INV-8: Rate-Limit Caps
-
-> **Statement:** Total minted value cannot exceed the hourly or daily cap within their respective windows.
-
-**Verification:**
-
-| Check | Status |
-|---|---|
-| Hourly window resets at `height - hourly_reset_height ≥ 120` | ✅ |
-| Daily window resets at `height - daily_reset_height ≥ 1440` | ✅ |
-| Hourly cap: `hourly_minted + amount ≤ 100_000_000_000` (100 SOL) | ✅ |
-| Daily cap: `daily_minted + amount ≤ 1_000_000_000_000` (1000 SOL) | ✅ |
-| Per-tx cap: `amount ≤ 50_000_000_000` (50 SOL) | ✅ |
-| Counters incremented atomically with mint/pending creation | ✅ |
-| Large TX delay: `amount ≥ 10 SOL → pending for 100 blocks` | ✅ |
-
-**Corner case:** If `executePendingMint` is called after a window reset, the minted amount was already counted against the PREVIOUS window's limit. The pending mint does NOT re-check rate limits at execution time. This is acceptable because the rate-limit was already satisfied at proof-submission time, but it means theoretical extraction in a transition window could marginally exceed the apparent hourly cap.
-
-**Holds: YES** — Rate limits are enforced at proof submission time, preventing extraction beyond the defined caps within any single window.
-
----
-
-## 4. Edge Case Analysis
-
-### 4.1 Numeric Extremes
-
-| Case | System Behavior | Status |
-|---|---|---|
-| `amount = 0` | Rejected by `minMintAmount` check on DCC; rejected by `min_deposit` on Solana | ✅ Safe |
-| `amount = u64::MAX` | Rejected by `max_deposit` / `maxSingleMint` bounds | ✅ Safe |
-| `amount = 1` (below minimum) | Rejected by `min_deposit` (Solana) / `minMintAmount` (DCC) | ✅ Safe |
-| `amount = min_deposit` exactly | Accepted. Mint `= min_deposit / 10`. If result is 0 due to rounding, `mintAmount == 0` check catches it | ✅ Safe |
-| `global_nonce = u64::MAX` | Overflow: Rust `u64` wraps in release mode. Would cause PDA collision. **Risk: LOW** — requires 2^64 deposits | ⚠️ Theoretical |
-| `total_locked = u64::MAX` | Rust overflow: checked math via `checked_add` not used uniformly. See §4.3 | ⚠️ |
-| `next_checkpoint_id = u64::MAX` | Overflow causes PDA collision. **Risk: Negligible** — requires 2^64 checkpoints | ⚠️ Theoretical |
-
-### 4.2 Concurrency & Ordering
-
-| Case | System Behavior | Status |
-|---|---|---|
-| Two deposits in same slot | Different `event_index` values → distinct PDAs and message_ids | ✅ Safe |
-| Checkpoint submitted before deposits finalize | `finality_safety_margin` enforces `current_slot ≥ cp_slot + margin` slots of delay | ✅ Safe |
-| Proof submitted after checkpoint expires | `checkpoint.active` check + `height - cp.height < expiry` rejects | ✅ Safe |
-| Burn and unlock race condition | UnlockRecord PDA prevents double-execution | ✅ Safe |
-| Multiple validators submit same attestation | Duplicate pubkey detection in unlock.rs rejects | ✅ Safe |
-
-### 4.3 Arithmetic Overflow
-
-Rust Anchor programs use standard arithmetic by default (wrapping in release, panicking in debug). Critical accumulator fields:
-
-| Field | Risk | Mitigation Present? |
-|---|---|---|
-| `total_locked += amount` | Overflow at 2^64 lamports ≈ 18.4 billion SOL | No `checked_add` — but exceeds SOL total supply (578M) | ✅ Practical safe |
-| `total_unlocked += amount` | Same | Same | ✅ |
-| `current_daily_outflow += amount` | Resets daily; max daily cap well below overflow | ✅ Safe |
-| `dcc total_minted` (RIDE Int = Long) | 64-bit signed; overflow at 2^63 | Practical safe (max supply constraint) | ✅ |
-
-**Recommendation:** Use `checked_add()` for all accumulator operations regardless — defense in depth.
-
-### 4.4 Domain Separation Boundary Cases
-
-| Case | Behavior | Status |
-|---|---|---|
-| `src_chain_id == dst_chain_id` | Not explicitly checked in Solana deposit. The circuit and RIDE verify chain IDs match expected constants, but Solana `compute_message_id` uses whatever `config.dcc_chain_id` is set to | ⚠️ Low |
-| `domain_sep` shorter than 17 bytes | Hard-coded as `"DCC_SOL_BRIDGE_V1"` (17 bytes) in all implementations | ✅ Safe |
-| `asset_id = 0` (all zeros) | Accepted — no check that asset_id is valid. Doesn't affect security (just a tag) | ✅ |
-
----
-
-## 5. Symbolic Attack Analysis
-
-### ATK-S1: Double-Mint via Proof Malleability
-
-**Attack vector:** Forge a second valid proof for the same deposit by manipulating the Groth16 proof $(A, B, C)$ components.
-
-**Analysis:** Groth16 produces exactly one valid proof for a given statement under a CRS. Proof malleability (e.g., negating $A$ and $B$) produces different byte representations that still verify. However, the `message_id` extracted from public inputs is identical between malleated proofs, so `processed_` replay protection blocks the second attempt.
-
-**Result:** ✅ SAFE — Replay protection is keyed on public inputs, not proof bytes.
-
-### ATK-S2: Grinding Message IDs
-
-**Attack vector:** Find two distinct deposits that hash to the same `message_id`, allowing one proof to "unlock" both.
-
-**Analysis:** `message_id = Keccak256(181_byte_preimage)`. Finding a collision requires $O(2^{128})$ operations (birthday bound). The 181-byte preimage includes sender pubkey (32 bytes), nonce, slot, and event_index — all unique per deposit. Pre-image resistance: $O(2^{256})$.
-
-**Result:** ✅ SAFE — Cryptographically infeasible.
-
-### ATK-S3: Cross-Chain Replay
-
-**Attack vector:** Use a valid Solana deposit proof to mint on a different chain (if bridge is deployed to multiple destination chains).
-
-**Analysis:** The circuit enforces `dst_chain_id` as a private input baked into the message preimage. The DCC contract hard-codes `dccChainId = 2`. A proof generated for `dst_chain_id = 3` would produce a different `message_id` and fail checkpoint inclusion. Furthermore, the domain separator `"DCC_SOL_BRIDGE_V1"` is chain-specific.
-
-**Result:** ✅ SAFE — Domain separation prevents cross-chain replay.
-
-### ATK-S4: Committee Capture on Checkpoints
-
-**Attack vector:** Compromise T committee members to inject a malicious checkpoint root containing fabricated deposit events.
-
-**Analysis:** On DCC, `approval_threshold ≥ 2` and `committee_size ≥ 3`. An attacker needs to compromise at least T members to forge a checkpoint. On Solana, `min_signatures` committee members must sign, verified via Ed25519 introspection. Both chains also enforce slot monotonicity and timelock delays.
-
-**Mitigation adequacy:** The timelock window (DCC: block-based, Solana: time-based) provides a window for honest observers to detect and pause. The `deactivateCheckpoint` function allows the guardian to remove malicious checkpoints.
-
-**Result:** ⚠️ CONDITIONAL — Security relies on honest-majority assumption. If T committee members are compromised AND the guardian fails to pause within the timelock window, fabricated deposits could be minted.
-
-### ATK-S5: Front-Running Pending Large Mints
-
-**Attack vector:** Admin calls `cancelPendingMint` on the victim's legitimate large mint, then replays the same proof for themselves.
-
-**Analysis:** `cancelPendingMint` deletes the pending state. However, the `processed_` flag is set at proof-submission time (T7), NOT at execution time (T8). After cancellation, the message_id is still marked processed. Nobody — including the admin — can resubmit the proof.
-
-**Result:** ✅ SAFE — The `processed_` flag is immutable once set.
-
-### ATK-S6: Validator-Key Rotation Attack on Unlocks
-
-**Attack vector:** Register M fresh validators, produce M attestations for a fraudulent burn, then deregister them.
-
-**Analysis:** Validator registration requires `authority` signature. If authority is compromised, the attacker has full control regardless. In normal operation, `min_validators` enforcement means at least M validators must attest, and the attestation message is domain-separated with the specific burn transaction hash.
-
-**Result:** ⚠️ CONDITIONAL — Requires authority key compromise.
-
-### ATK-S7: Griefing via Checkpoint Spam
-
-**Attack vector:** Spam checkpoint proposals to fill `max_pending` slots, blocking legitimate checkpoints.
-
-**Analysis:** On Solana, `max_pending` limits concurrent pending checkpoints. On DCC, only committee members can propose (`caller ∈ committee`). Non-committee spam is rejected. Committee-level griefing is possible but requires compromised committee keys.
-
-**Result:** ✅ SAFE — Non-members cannot propose.
-
----
-
-## 6. Serialization Consistency Verification
-
-The bridge's critical security assumption is that all four implementations (Rust/Solana, TypeScript/Prover, RIDE/DCC, Circom/ZK) produce identical `message_id` hashes for the same deposit event.
-
-### 6.1 Canonical Preimage Layout (181 bytes)
-
-| Offset | Length | Field | Encoding |
-|---|---|---|---|
-| 0 | 17 | `"DCC_SOL_BRIDGE_V1"` | ASCII |
-| 17 | 4 | `src_chain_id` | LE u32 |
-| 21 | 4 | `dst_chain_id` | LE u32 |
-| 25 | 32 | `src_program_id` | Raw bytes |
-| 57 | 8 | `slot` | LE u64 |
-| 65 | 4 | `event_index` | LE u32 |
-| 69 | 32 | `sender` | Raw bytes |
-| 101 | 32 | `recipient` | Raw bytes |
-| 133 | 8 | `amount` | LE u64 |
-| 141 | 8 | `nonce` | LE u64 |
-| 149 | 32 | `asset_id` | Raw bytes |
-| **Total** | **181** | | `Keccak256(preimage)` |
-
-### 6.2 Implementation-by-Implementation Comparison
-
-#### Rust (deposit.rs)
+### 2.1 Deposit Flow (SOL → DCC)
 
 ```
-DOMAIN_SEP[17] || src_chain_id.to_le_bytes()[4] || dst_chain_id.to_le_bytes()[4]
-|| src_program_id.to_bytes()[32] || slot.to_le_bytes()[8] || event_index.to_le_bytes()[4]
-|| sender.to_bytes()[32] || recipient_dcc[32] || amount.to_le_bytes()[8]
-|| nonce.to_le_bytes()[8] || asset_id.to_bytes()[32]
+T1: DEPOSIT(sender, amount, recipient_dcc)
+  Pre:   !paused ∧ min_deposit ≤ amount ≤ max_deposit ∧ recipient_dcc ≠ 0
+  Post:  vault_balance += amount
+         total_locked += amount
+         global_nonce += 1
+         DepositRecord[transfer_id] created
+         UserState.next_nonce += 1
+         BridgeDeposit event emitted
 ```
-**Length:** 17+4+4+32+8+4+32+32+8+8+32 = **181** ✅
 
-#### TypeScript (message.ts)
+### 2.2 Checkpoint Submission
+
+```
+T2: SUBMIT_CHECKPOINT(commitment_root, slot, signatures[])
+  Pre:   !paused ∧ slot > last_checkpoint_slot ∧ signatures.len ≥ min_signatures
+         ∧ all signatures valid ∧ validator PDAs validated (CRIT-1/2 fix)
+  Post:  CheckpointEntry[next_id] created (status=Pending, activates_at=now+timelock)
+         next_checkpoint_id += 1
+         last_checkpoint_slot = slot
+```
+
+### 2.3 ZK Proof Verification & Mint (Phase 2)
+
+```
+T3: VERIFY_AND_MINT(proof, inputs, checkpointId, ...)
+  Pre:   !paused ∧ vk_set ∧ checkpoint[id].active ∧ checkpoint fresh
+         ∧ !zk_processed[messageId]
+         ∧ localMessageId == proofMessageId (RIDE recomputes)
+         ∧ proofAmount == amount ∧ proofRecipient == recipient
+         ∧ proofRoot == storedRoot ∧ proofVersion == 1
+         ∧ groth16Verify(vk, proof, inputs) == true
+         ∧ recipientAddress matches proof recipient (CRIT-3 fix)
+  Post:  zk_processed[messageId] = true
+         Cross-contract invoke → zkMintAuthorized(...)
+         totalMinted += mintAmount
+         hourly/daily counters updated
+         wSOL Reissued & transferred (or queued if large)
+```
+
+### 2.4 Committee Mint (Phase 1)
+
+```
+T4: COMMITTEE_MINT(transferId, recipient, amount, solSlot, signatures[], pubkeys[])
+  Pre:   !paused ∧ !processed[transferId] ∧ amount in [min, max]
+         ∧ no duplicate pubkeys (CRIT-4 fix)
+         ∧ validSigs ≥ threshold ∧ each signer is committee member
+         ∧ hourly/daily limits not exceeded
+  Post:  processed[transferId] = true
+         totalMinted += mintAmount
+         wSOL Reissued & transferred (or queued if large, with totalMinted updated per HIGH-5)
+```
+
+### 2.5 Burn (DCC → SOL direction, DCC side)
+
+```
+T5: BURN(solRecipient)
+  Pre:   !paused ∧ payment is wSOL ∧ amount ≥ minMintAmount
+  Post:  wSOL burned (supply decreases)
+         totalBurned += amount (HIGH-6 fix: global counter updated)
+         burn_nonce[caller] += 1
+         burnRecord[burnId] created (VULN-13: replay checked)
+         processed[burnMessageId] = true
+```
+
+### 2.6 Unlock (SOL release on Solana after DCC burn)
+
+```
+T6: UNLOCK(transfer_id, recipient, amount, attestations[])
+  Pre:   !paused ∧ dcc_chain_id matches ∧ !expired
+         ∧ amount ≤ max_unlock_amount
+         ∧ attestations.len ≥ min_validators ∧ no dup validators
+         ∧ each validator PDA validated (CRIT-1 fix)
+         ∧ ed25519 signatures verified via introspection
+         ∧ daily_outflow + amount ≤ max_daily_outflow
+  Post:  if large: scheduled (daily_outflow committed per HIGH-1 fix), return
+         else: vault_balance -= amount
+               total_unlocked += amount
+               total_locked -= amount (LOW-2 fix)
+               UnlockRecord[transfer_id] created (executed=true)
+```
+
+### 2.7 Execute Scheduled Unlock
+
+```
+T7: EXECUTE_SCHEDULED_UNLOCK(transfer_id)
+  Pre:   !paused ∧ !already_executed ∧ now ≥ scheduled_time
+         ∧ daily_outflow + amount ≤ max_daily_outflow (HIGH-2 fix)
+  Post:  vault_balance -= amount
+         total_unlocked += amount
+         total_locked -= amount (LOW-2 fix)
+         current_daily_outflow += amount
+         executed = true
+```
+
+### 2.8 Emergency Pause
+
+```
+T8: EMERGENCY_PAUSE()
+  Pre:   caller is admin OR guardian
+  Post:  paused = true
+```
+
+### 2.9 Timelocked Resume
+
+```
+T9a: REQUEST_RESUME()
+  Pre:   caller is admin ∧ paused
+  Post:  resume_requested_at = now
+
+T9b: EXECUTE_RESUME()
+  Pre:   caller is admin ∧ paused ∧ now - resume_requested_at ≥ delay
+  Post:  paused = false ∧ resume_requested_at deleted
+```
+
+### 2.10 Configuration Updates
+
+```
+T10: UPDATE_CONFIG(params)
+  Pre:   caller is authority
+  Post:  config fields updated with guards:
+         min_validators ≥ 3 (MED-5)
+         large_withdrawal_delay ≥ 300 (MED-4)
+         new_authority → pending + 24h timelock (HIGH-3)
+```
+
+### 2.11 Auto-Pause (Anomaly Detection)
+
+```
+T11: AUTO_PAUSE (triggered within T3/T4)
+  Pre:   hourlyMinted > anomalyThresholdPerHour
+  Post:  paused = true (atomically within mint tx)
+```
+
+---
+
+## 3. INVARIANT VERIFICATION
+
+### INVARIANT 1: Wrapped Supply ≤ Locked Assets
+
+**Statement:** `totalMinted_DCC - totalBurned_DCC ≤ vault_balance_SOL`
+
+**Analysis:**
+
+For this invariant, we must track all paths that increment `totalMinted` and all paths that decrement `vault_balance`.
+
+**Minting paths (increase outstanding):**
+- `committeeMint` (T4): increments `totalMinted` by `mintAmount = amount / 10` (decimal conversion 9→8)
+- `zkMintAuthorized` (via T3): same formula
+- Both paths update `totalMinted` even for pending large mints (HIGH-5 fix)
+
+**Unlocking paths (decrease vault):**
+- Immediate unlock (T6): decreases vault via CPI transfer
+- Scheduled unlock (T7): same
+
+**Correctness conditions:**
+1. Each mint MUST correspond to a real deposit (enforced by committee signatures or ZK proof)
+2. Each unlock MUST correspond to a real burn (enforced by validator attestations)
+3. Deposits lock SOL atomically (T1: CPI transfer → total_locked increment in same tx)
+4. The decimal conversion is consistent: Solana 9 decimals → DCC 8 decimals (÷10)
+
+**Potential violation paths:**
+- ~~CRIT-1 (forged validators) → FIXED: PDA validation~~ ✅
+- ~~CRIT-3 (front-running ZK mints) → FIXED: recipient binding~~ ✅
+- ~~CRIT-4/5 (duplicate pubkeys) → FIXED: dedup check~~ ✅
+- Re-minting with same message: blocked by `processed_` / `zk_processed_` entries
+- VK replacement (backdoor proofs): blocked by `vk_frozen` immutability (HIGH-7)
+- DataTransaction state corruption: blocked by `@Verifier` (CRIT-6)
+
+**Verdict: HOLDS** under the assumption that:
+- (A-1) Groth16 trusted setup is secure
+- (A-2) BN128 curve is secure
+- (A-3) Fewer than `min_validators` validators are compromised
+- (A-4) Admin keys are not compromised (for committee mint path)
+
+**Residual risk:** The `cancelPendingMint` function on DCC deletes the pending records but does NOT decrement `totalMinted` (which was pre-incremented per HIGH-5). This means cancelling a pending large mint permanently inflates `totalMinted` by the cancelled amount, making `outstanding = totalMinted - totalBurned` larger than the actual circulating supply. This does NOT violate the invariant (the vault still has the locked SOL), but it makes the invariant check less tight.
+
+---
+
+### INVARIANT 2: Each Message ID Processed At Most Once
+
+**Statement:** `∀ messageId: processed(messageId) never transitions from true → false`
+
+**Analysis:**
+
+Replay protection storage:
+- **Solana DepositRecord PDA:** `seeds = [b"deposit", transfer_id]` — Anchor `init` constraint fails if PDA exists
+- **Solana UnlockRecord PDA:** `seeds = [b"unlock", transfer_id]` — same `init` guard
+- **DCC zk_bridge:** `processed_{messageId}` boolean entry, checked before mint
+- **DCC zk_verifier:** `zk_processed_{messageId}` boolean entry, checked before verify
+- **DCC bridge_controller:** `processed_{transferId}` boolean entry, checked before mint
+- **DCC burn records:** `burn_{burnId}` string entry existence check (VULN-13 fix)
+
+**Can processed entries be reset?**
+- **Solana:** PDA-based, cannot be re-initialized (Anchor discriminator + init)
+- **DCC:** `@Verifier` blocks ALL DataTransactions on all three RIDE contracts → entries cannot be deleted
+
+**Validator off-chain dedup:**
+- `processedTransfers` Set in engine.ts — capped at 100K (VAL-10), oldest evicted
+- This is a performance optimization only; on-chain replay protection is the ultimate guard
+
+**Verdict: HOLDS** ✅  
+The PDA-based replay protection on Solana is unforgeable. The `@Verifier`-protected boolean entries on DCC are immutable. Even if the validator's in-memory Set evicts old entries, re-processing is blocked on-chain.
+
+---
+
+### INVARIANT 3: Withdrawal Only After Valid Burn Proof
+
+**Statement:** `∀ unlock: a valid DCC burn event preceded it`
+
+**Analysis:**
+
+The unlock flow (T6) requires:
+1. M-of-N validator Ed25519 signatures over the canonical unlock message
+2. Each validator must be an active, PDA-validated entry (CRIT-1 fix)
+3. The message includes `burn_tx_hash` binding the unlock to a specific DCC burn
+4. The unlock creates a PDA `[b"unlock", transfer_id]` preventing replay
+
+Validators sign unlocks only after observing the burn event on DCC:
+- `dcc-watcher.ts` monitors the DCC chain for burn events
+- Event discriminator validation: SHA-256 discriminator check (VAL-8 fix)
+- Multi-node verification for DCC events (VAL-7 fix)
+
+**Can an unlock occur without a burn?**
+Only if ≥ `min_validators` (≥ 3) collude to sign a fabricated burn_tx_hash. The on-chain contract has no way to independently verify the DCC burn occurred — it relies entirely on validator attestations.
+
+**Verdict: HOLDS** under assumption A-3 (honest majority among validators)
+
+---
+
+### INVARIANT 4: Invalid ZK Proofs Must Never Change Contract State
+
+**Statement:** `∀ proof: ¬groth16Verify(vk, proof, inputs) ⟹ no state change`
+
+**Analysis:**
+
+In `verifyAndMint` (zk_verifier.ride):
+1. All pre-checks (paused, vk_set, checkpoint active, checkpoint fresh, replay) execute first
+2. RIDE recomputes `localMessageId` from caller parameters
+3. Extracts proof values from public inputs
+4. Cross-validates: localMessageId == proofMessageId, amounts match, recipients match, root matches
+5. **Only then** calls `bn256Groth16Verify_8inputs(vk, proof, inputs)`
+6. **Only if verification passes** does the cross-contract `invoke` to `zkMintAuthorized` occur
+7. The only state change in the verifier itself is `zk_processed_[messageId] = true`, which occurs AFTER proof verification
+
+**RIDE atomicity guarantee:** If `groth16Verify` returns false → `throw()` → entire transaction reverts, including any changes made before the throw.
+
+**Verdict: HOLDS** ✅  
+RIDE's atomic transaction model guarantees complete rollback on any failure in the callable chain.
+
+---
+
+### INVARIANT 5: Checkpoint Roots Cannot Be Substituted
+
+**Statement:** `∀ checkpoint: root was committed by ≥ threshold committee members before becoming active`
+
+**Analysis:**
+
+**DCC checkpoint flow** (zk_verifier.ride):
+1. `proposeCheckpoint`: committee member creates proposal, records root + slot
+2. `approveCheckpoint`: additional members approve; at threshold, checkpoint activates
+3. Both proposeCheckpoint and approveCheckpoint check `isCommitteeMember(callerPublicKey)`
+4. Committee member identity uses `callerPublicKey` (DCC runtime-provided, cannot be spoofed)
+5. Double-approval prevention: `keyProposalApproved(proposalId, addr)` checked per-member
+
+**Solana checkpoint flow** (checkpoint_registry):
+1. Same pattern with `submit_checkpoint` requiring committee signatures
+2. CRIT-2 fix: `remaining_accounts` validated as legitimate committee member PDAs
+
+**Can an attacker substitute a root?**
+- They would need to compromise ≥ threshold committee members' signing keys
+- Or forge committee member PDAs on Solana (blocked by CRIT-2 fix)
+- DataTransaction root corruption blocked by `@Verifier` on DCC
+
+**Verdict: HOLDS** under assumption that fewer than `threshold` committee members are compromised
+
+---
+
+### INVARIANT 6: Replay Protection Survives Restarts and Upgrades
+
+**Statement:** Replay protection state persists across process restarts and contract upgrades
+
+**Analysis:**
+
+**On-chain (permanent):**
+- Solana PDA accounts persist until explicitly closed (none of the instructions close deposit/unlock PDAs)
+- DCC data entries persist in account state and cannot be deleted (DataTransaction blocked by @Verifier)
+
+**Off-chain validator:**
+- `processedTransfers` persisted to disk file (loaded on startup) — VAL-3 fix
+- Rate limiter state persisted to disk — VAL-3 fix
+- Even if disk file is lost, on-chain replay protection (PDAs, boolean entries) prevents double-processing
+
+**Upgrade scenarios:**
+- Solana program upgrade: PDAs persist (account data is independent of program bytecode)
+- DCC contract upgrade (`SetScriptTransaction`): data entries persist (RIDE data storage is separate from script)
+- But: a SetScript could deploy a new contract that reads stored data differently. Mitigated by `@Verifier` requiring deployer signature for SetScript.
+
+**Verdict: HOLDS** ✅  
+On-chain replay protection is persistent and independent of bytecode. Off-chain persistence is a defense-in-depth measure.
+
+---
+
+### INVARIANT 7: Paused Bridge Blocks All Mint and Withdraw Operations
+
+**Statement:** `paused = true ⟹ no mint, burn, unlock, or checkpoint submission succeeds`
+
+**Analysis:**
+
+**Functions that check `paused`:**
+| Function | Contract | Pause Check |
+|----------|----------|-------------|
+| `deposit` | sol-bridge-lock | `require!(!config.paused)` ✅ |
+| `unlock` | sol-bridge-lock | `require!(!config.paused)` ✅ |
+| `execute_scheduled_unlock` | sol-bridge-lock | `require!(!config.paused)` ✅ |
+| `committeeMint` | zk_bridge.ride | `if (isPaused()) then throw` ✅ |
+| `zkMintAuthorized` | zk_bridge.ride | `if (isPaused()) then throw` ✅ |
+| `executePendingMint` | zk_bridge.ride | `if (isPaused()) then throw` ✅ |
+| `burn` | zk_bridge.ride | `if (isPaused()) then throw` ✅ |
+| `verifyAndMint` | zk_verifier.ride | `if (isPaused()) then throw` ✅ |
+| `proposeCheckpoint` | zk_verifier.ride | `if (isPaused()) then throw` ✅ |
+| `approveCheckpoint` | zk_verifier.ride | `if (isPaused()) then throw` ✅ |
+| `mint` / `mintToken` | bridge_controller.ride | `if (isPaused()) then throw` ✅ |
+| `burnToken` / `burn` | bridge_controller.ride | `if (isPaused()) then throw` ✅ |
+| `executePendingMint` | bridge_controller.ride | `if (isPaused()) then throw` ✅ |
+
+**Resume requires timelock:**
+- Solana: `request_resume` then wait `resume_delay_seconds ≥ 300`
+- DCC (zk_bridge, zk_verifier, bridge_controller): `requestUnpause/requestResume` then wait `unpauseDelayBlocks = 100`
+
+**Verdict: HOLDS** ✅  
+All value-moving functions check the pause flag. Resume is timelocked on all chains.
+
+---
+
+### INVARIANT 8: Rate Limits Cap Maximum Extractable Value Per Window
+
+**Statement:** `∀ time_window: outflow(window) ≤ max_daily_outflow`
+
+**Analysis:**
+
+**Solana unlock path:**
+- Immediate unlocks: `current_daily_outflow += amount`, checked against `max_daily_outflow`
+- Scheduled unlocks: `current_daily_outflow` committed at queue time (HIGH-1 fix)
+- Execution: re-checked at execution time (HIGH-2 fix) with aligned window reset (LOW-3 fix)
+
+**DCC mint path:**
+- Hourly: `hourlyMinted + amount ≤ maxHourlyMint` (100 SOL equiv)
+- Daily: `dailyMinted + amount ≤ maxDailyMint` (1000 SOL equiv)
+- Single tx: `amount ≤ maxSingleMint` (50 SOL equiv)
+- Auto-pause: `hourlyMinted > anomalyThresholdPerHour (200 SOL)` → paused = true
+
+**Validator rate limiter:**
+- `canConsume()` check before consensus (VAL-5 fix: no budget consumed pre-consensus)
+- `consume()` only after consensus succeeds
+- State persisted to disk (VAL-3 fix)
+
+**Window boundary attack (LOW-3):**
+- Fixed via aligned window reset: `last_daily_reset += (elapsed / day_seconds) * day_seconds`
+- This prevents double-counting at window boundaries
+
+**Can rate limits be bypassed?**
+- Config update can change `max_daily_outflow` — requires authority signature
+- DCC rate limits are compiled into the contract (constants), not admin-updatable
+- But DCC `maxDailyMint` in bridge_controller is admin-updatable via `updateMaxDailyMint`
+
+**Verdict: HOLDS** ✅ under assumption A-4 (admin keys secure)  
+The circuit breaker is checked on both immediate and scheduled paths. Window boundaries are properly aligned.
+
+---
+
+## 4. EDGE CASE ANALYSIS
+
+### E-1: Simultaneous Transactions
+
+**Scenario:** Two deposits submitted in the same Solana slot.
+
+**Analysis:** Each deposit uses a unique `transfer_id = hash(sender, nonce)`. Nonces are per-user and monotonically increasing. Even if two users deposit simultaneously, their transfer_ids differ. Same user submitting twice would fail: the second `init` PDA would find the PDA already exists.
+
+**Result:** No invariant violated ✅
+
+### E-2: Replay Attempts
+
+**Scenario:** Attacker resubmits a previously successful mint/unlock transaction.
+
+**Analysis:**
+- Solana: PDA `[b"unlock", transfer_id]` already exists → `init` fails
+- DCC: `processed_{messageId}` is `true` → `throw("Already processed")`
+- ZK path: `zk_processed_{messageId}` is `true` → `throw("Already ZK-processed")`
+
+**Result:** No invariant violated ✅
+
+### E-3: Proof Submission Race Condition
+
+**Scenario:** Two parties submit the same ZK proof simultaneously on DCC.
+
+**Analysis:** DCC processes transactions sequentially per account. The first transaction sets `zk_processed_{messageId} = true`. The second finds it already set and reverts.
+
+**Result:** No invariant violated ✅
+
+### E-4: Mutated Message Payloads
+
+**Scenario:** Attacker modifies fields of a valid mint message.
+
+**Analysis:**
+- Committee mint: message is `transferId|recipient|amount|solSlot` — signature verification fails if any byte changes
+- ZK mint: message_id is Keccak256 of all fields — changing any field changes the hash, which won't match the proof
+
+**Result:** No invariant violated ✅
+
+### E-5: Expired Checkpoints
+
+**Scenario:** Attacker uses an expired checkpoint to verify a proof.
+
+**Analysis:** `verifyAndMint` checks `height - cpHeight > maxCheckpointAge (10080 blocks)`. Expired checkpoints are rejected. Additionally, `deactivateCheckpoint` can be called by anyone once `checkpointExpiryBlocks (1440)` have elapsed.
+
+**Result:** No invariant violated ✅
+
+### E-6: Partial System Failure — Validator Node Restart
+
+**Scenario:** A validator restarts mid-consensus.
+
+**Analysis:**
+- `processedTransfers` loaded from disk on startup (if file exists)
+- `rateLimiter` state loaded from disk (within 24h window)
+- Pending consensus rounds in memory are lost → those transfers require re-initiation
+- On-chain replay protection prevents double-processing if the transfer was already submitted
+
+**Result:** No invariant violated ✅ (liveness temporarily degraded, safety preserved)
+
+### E-7: Corrupted Relayer Inputs
+
+**Scenario:** Malicious relayer provides fabricated deposit events.
+
+**Analysis:**
+- Solana watcher verifies event discriminators (VAL-8 fix: SHA-256 discriminator)
+- Events are read from on-chain account data, not from untrusted off-chain sources
+- DCC watcher uses multi-node verification (VAL-7 fix)
+- Validators reach consensus before acting — single corrupted input is outvoted
+
+**Result:** No invariant violated ✅ under assumption A-3
+
+### E-8: cancelPendingMint After HIGH-5 Fix
+
+**Scenario:** Admin cancels a pending large mint after `totalMinted` was pre-incremented.
+
+**Analysis:**
+- `cancelPendingMint` deletes pending records but does NOT decrement `totalMinted`
+- This permanently inflates `totalMinted` by the cancelled amount
+- The wSOL was never Reissued/transferred, so actual circulating supply is correct
+- But `outstanding = totalMinted - totalBurned` overstates reality
+
+**Risk Level:** Low. Does not enable theft (vault still holds the SOL). Creates accounting inaccuracy.
+
+**Recommendation:** `cancelPendingMint` should decrement `totalMinted` by the cancelled amount.
+
+---
+
+## 5. SYMBOLIC ATTACK ANALYSIS
+
+### Attacker Model
+
+The attacker controls:
+- Relayer/prover inputs (can submit arbitrary proofs)
+- Transaction ordering (can front-run, sandwich, timing attacks)
+- One or more (but < min_validators) validator nodes
+- DCC mempool observation
+
+### Attack 1: Forge Validator Accounts (CRIT-1)
+
+**Pre-fix:** Attacker creates accounts with matching pubkey/active fields but not owned by program.  
+**Post-fix:** PDA validation requires `acc.owner == program_id` AND `Pubkey::find_program_address` match AND discriminator match AND `active == true`.  
+**Result:** ❌ BLOCKED. Attacker cannot create accounts at the correct PDA address without the program's private key.
+
+### Attack 2: Front-Run ZK Mint (CRIT-3)
+
+**Pre-fix:** Watch DCC mempool for `verifyAndMint`, copy proof, change `recipientAddress`.  
+**Post-fix:** `recipientAddress` must match `recipient` bytes embedded in the ZK proof.  
+**Result:** ❌ BLOCKED. The proof cryptographically binds the recipient. Changing the address violates the equality check.
+
+### Attack 3: Duplicate Pubkey Signature Multiplication (CRIT-4/5)
+
+**Pre-fix:** Submit same pubkey N times to meet M-of-N threshold with 1 key.  
+**Post-fix:** FOLD-based pairwise duplicate detection rejects repeated keys.  
+**Result:** ❌ BLOCKED.
+
+### Attack 4: DataTransaction State Corruption (CRIT-6)
+
+**Pre-fix:** Deployer key sends DataTransaction to delete `processed_` entries.  
+**Post-fix:** `@Verifier` returns `false` for all DataTransactions on all three DCC contracts.  
+**Result:** ❌ BLOCKED.
+
+### Attack 5: Eclipse Attack via P2P Injection (VAL-2)
+
+**Pre-fix:** Inject fake peer addresses to isolate validator.  
+**Post-fix:** `peer_list` requires sender to be in authenticated `this.peers` map, capped at 50, address length < 256.  
+**Result:** ❌ BLOCKED for unauthenticated peers. Partially mitigated for compromised authenticated peers (still capped at 50).
+
+### Attack 6: Consensus Timestamp Manipulation (CRIT-7)
+
+**Pre-fix:** `Date.now()` at submission ≠ `request.timestamp` at consensus → signature mismatch.  
+**Post-fix:** `result.requestTimestamp` used consistently in both consensus and submission.  
+**Result:** ❌ BLOCKED.
+
+### Attack 7: Rate Limit Budget Drain (VAL-5)
+
+**Pre-fix:** Flood valid-looking requests that consume rate limit during consensus, even if consensus fails.  
+**Post-fix:** `canConsume()` (read-only) before consensus; `consume()` (mutating) only after success.  
+**Result:** ❌ BLOCKED.
+
+### Attack 8: nodeId Spoofing in Consensus (VAL-6)
+
+**Pre-fix:** Attacker sends attestations with spoofed nodeIds.  
+**Post-fix:** `receiveAttestation` verifies `nodeId === pubkeyHex`. Mismatch → rejected + `byzantine_detected`.  
+**Result:** ❌ BLOCKED.
+
+---
+
+## 6. SERIALIZATION CONSISTENCY
+
+### ⚠️ CRITICAL FINDING: event_index Width Mismatch (Post LOW-1 Fix)
+
+The LOW-1 fix widened `event_index` from `u32` to `u64` in the Solana program. This introduced a **serialization inconsistency** across the three components that compute `message_id`:
+
+| Component | event_index encoding | Preimage size |
+|-----------|---------------------|---------------|
+| **Solana** `deposit.rs` `compute_message_id` | `event_index.to_le_bytes()` = **8 bytes** (u64) | **185 bytes** |
+| **DCC** `zk_verifier.ride` `computeMessageId` | `intToLE4(eventIndex)` = **4 bytes** | **181 bytes** |
+| **ZK Circuit** `bridge_deposit.circom` | `event_index_bits[32]` = **4 bytes** (32 bits) | **181 bytes** (1448 bits) |
+
+**Impact:** The Solana on-chain `message_id` computed after the LOW-1 fix uses a 185-byte preimage (8-byte event_index), while the RIDE verifier and ZK circuit both use 181-byte preimages (4-byte event_index). These produce **different Keccak256 hashes** even for identical input values.
+
+**Consequence:**
+- **Phase 2 (ZK minting) is BROKEN** for any deposit made after the LOW-1 fix deployment. The verifier's `localMessageId ≠ proofMessageId` check will always fail because the preimage sizes differ.
+- **Phase 1 (committee minting) is UNAFFECTED** because `committeeMint` uses `transferId|recipient|amount|solSlot` message format, not `computeMessageId`.
+
+**Stale test:** The Solana unit test at deposit.rs L295-299 asserts `total = 181` using `event_index(4)`, but the actual code writes 8 bytes. The test only checks arithmetic, not actual hash output.
+
+**Required fix:** Either:
+1. Update RIDE `computeMessageId` and ZK circuit to use 8-byte (64-bit) event_index encoding, OR
+2. Revert Solana `compute_message_id` to use 4-byte LE for event_index in the preimage (keep storage as u64 but truncate for hashing)
+
+### Other Serialization Fields — Consistent ✅
+
+| Field | Solana | RIDE | ZK Circuit |
+|-------|--------|------|------------|
+| domain_sep | 17 bytes (`"DCC_SOL_BRIDGE_V1"`) | 17 bytes (`toBytes(domainSeparator)`) | 136 bits (17 bytes) |
+| src_chain_id | 4 bytes LE (u32) | `intToLE4(srcChainId)` | 32 bits |
+| dst_chain_id | 4 bytes LE (u32) | `intToLE4(dstChainId)` | 32 bits |
+| src_program_id | 32 bytes | 32 bytes (param validated) | 256 bits |
+| slot | 8 bytes LE (u64) | `intToLE8(slot)` | 64 bits |
+| sender | 32 bytes | 32 bytes (param validated) | 256 bits |
+| recipient | 32 bytes | 32 bytes (param validated) | 256 bits |
+| amount | 8 bytes LE (u64) | `intToLE8(amount)` | 64 bits |
+| nonce | 8 bytes LE (u64) | `intToLE8(nonce)` | 64 bits |
+| asset_id | 32 bytes | 32 bytes (param validated) | 256 bits |
+
+All fields are consistent across all three components EXCEPT `event_index`.
+
+---
+
+## 7. PROPERTY-BASED TESTS
+
+The following property-based test suite verifies invariants under randomized adversarial inputs. See `tests/property-based-invariants.test.ts` for the runnable implementation.
 
 ```typescript
-Buffer.from("DCC_SOL_BRIDGE_V1")                    // 17
-writeU32LE(srcChainId)                               // 4
-writeU32LE(dstChainId)                               // 4
-Buffer.from(srcProgramId, 'hex')                     // 32
-writeU64LE(slot)                                     // 8
-writeU32LE(eventIndex)                               // 4
-Buffer.from(sender, 'hex')                           // 32
-Buffer.from(recipient, 'hex')                        // 32
-writeU64LE(amount)                                   // 8
-writeU64LE(nonce)                                    // 8
-Buffer.from(assetId, 'hex')                          // 32
-```
-**Length:** 17+4+4+32+8+4+32+32+8+8+32 = **181** ✅
-
-#### RIDE (zk_bridge.ride — `computeMessageId`)
-
-```ride
-domainSeparator.toBytes()                            # 17
-+ intToLE4(solChainId)                               # 4
-+ intToLE4(dccChainId)                               # 4
-+ srcProgramId.fromBase16String()                    # 32
-+ intToLE8(slot)                                     # 8
-+ intToLE4(eventIndex)                               # 4
-+ sender.fromBase16String()                          # 32
-+ recipient.fromBase16String()                       # 32
-+ intToLE8(amount)                                   # 8
-+ intToLE8(nonce)                                    # 8
-+ assetId.fromBase16String()                         # 32
-```
-**Length:** 17+4+4+32+8+4+32+32+8+8+32 = **181** ✅  
-**Hash function:** `keccak256(preimage)` ✅
-
-#### Circom (bridge_deposit.circom)
-
-```
-domain_sep[136 bits = 17 bytes]
-|| src_chain_id[32 bits = 4 bytes]
-|| dst_chain_id[32 bits = 4 bytes]
-|| src_program_id[256 bits = 32 bytes]
-|| slot[64 bits = 8 bytes]
-|| event_index[32 bits = 4 bytes]
-|| sender[256 bits = 32 bytes]
-|| recipient[256 bits = 32 bytes]
-|| amount[64 bits = 8 bytes]
-|| nonce[64 bits = 8 bytes]
-|| asset_id[256 bits = 32 bytes]
-```
-**Length:** 136+32+32+256+64+32+256+256+64+64+256 = **1448 bits = 181 bytes** ✅  
-**Hash function:** `Keccak256(1448 bits)` ✅
-
-### 6.3 Golden Test Vector Cross-Validation
-
-All four implementations are required to produce the same hash for the canonical test vector defined in `spec/encoding.md` and verified in `deposit.rs`:
-
-```
-message_id = 0x6ad0deb8ad960e168e2ceb0c6923a94b90c9015386ffd60ce8550d0e17d96444
+// Property-based test summary:
+// - 10,000 simulations × 1,000 operations each = 10M operations
+// - Random actions: deposit, mint, burn, unlock, replay attempts,
+//   pause/resume, window resets, invalid amounts
+// - Checked after every operation:
+//   INV-1: outstanding_DCC * 10 ≤ vault_balance
+//   INV-2: no transfer processed twice (Set enforcement)
+//   INV-7: paused ⟹ all state-changing ops return false
+//   INV-8: daily_outflow ≤ max_daily_outflow
 ```
 
-| Implementation | Verified? |
-|---|---|
-| Rust `compute_message_id` unit test | ✅ |
-| TypeScript `computeMessageId` unit test | ✅ |
-| RIDE `computeMessageId` (same preimage layout) | ✅ (structural) |
-| Circom preimage assembly (same bit layout) | ✅ (structural) |
+### Test Categories
 
-### 6.4 Consistency Findings
-
-| Finding | Severity | Status |
-|---|---|---|
-| **All 4 implementations use identical 181-byte layout** | — | ✅ Consistent |
-| **All use LE encoding for integers** | — | ✅ Consistent |
-| **All use the same domain separator string** | — | ✅ Consistent |
-| **RIDE uses `keccak256`** (not `blake2b256` as spec/encoding.md §3.4 states) | Doc | ⚠️ Stale doc |
-| **spec/encoding.md §5 says `recipient_hash`** but circuit uses raw `recipient` bytes | Doc | ⚠️ Stale doc |
-
-**DOC-1:** `spec/encoding.md` §3.4 states: _"RIDE: blake2b256 for binding checks (Keccak not natively available in RIDE v6)"_. This is **incorrect** — RIDE v6 does provide `keccak256`, and the contract uses it. The documentation is stale from a pre-v6 era.
-
-**DOC-2:** `spec/encoding.md` §5 ZK Public Input Packing table lists inputs `[5]` and `[6]` as `recipient_hash[0..16]` and `recipient_hash[16..32]`. The actual circuit and RIDE contract use **raw recipient bytes** split into `recipient_lo` / `recipient_hi` (128 bits each), not a hash. The spec is outdated.
-
-### 6.5 ZK Public Input Packing
-
-The circuit exposes 8 public field elements (BN128 scalar field, ~254 bits each):
-
-| Index | Value | Split Method |
-|---|---|---|
-| 0 | `checkpoint_root_lo` | `root[0..16]` as LE 128-bit BigInt |
-| 1 | `checkpoint_root_hi` | `root[16..32]` as LE 128-bit BigInt |
-| 2 | `message_id_lo` | `msgId[0..16]` as LE 128-bit BigInt |
-| 3 | `message_id_hi` | `msgId[16..32]` as LE 128-bit BigInt |
-| 4 | `amount` | Full u64, zero-extended to field element |
-| 5 | `recipient_lo` | `recipient[0..16]` as LE 128-bit BigInt |
-| 6 | `recipient_hi` | `recipient[16..32]` as LE 128-bit BigInt |
-| 7 | `version` | Must equal 1 |
-
-The RIDE contract reconstructs all values from the Groth16 public input array, NOT from user-supplied arguments. This prevents the "public input substitution" attack where a user passes different values alongside a valid proof.
+| Category | Operations | Invariants Checked |
+|----------|-----------|-------------------|
+| Random deposit/burn sequences | Deposit + mint, burn + unlock | INV-1 (supply conservation) |
+| Replay attempts | Re-deposit same transfer_id, re-unlock same id | INV-2 (uniqueness) |
+| Invalid proof simulation | Zero amounts, negative values, overflow | INV-4 (no state change) |
+| Checkpoint mutation | Expired checkpoints, forged roots | INV-5 (integrity) |
+| Pause toggling | Random pause/resume during operations | INV-7 (pause blocks all) |
+| Extreme values | u64 max amounts, zero amounts | INV-1, INV-8 (bounds) |
+| Window boundary | Reset daily counter mid-sequence | INV-8 (rate limits) |
 
 ---
 
-## 7. Property-Based Test Results
+## 8. FINDINGS & REQUIRED FIXES
 
-Tests located in `tests/security/invariant-property-tests.mjs`.
+### NEW Finding: Serialization Mismatch (event_index Width)
 
-### 7.1 Test Suite Summary
+| Attribute | Value |
+|-----------|-------|
+| **Severity** | HIGH (breaks ZK minting path entirely) |
+| **Component** | Solana `deposit.rs`, DCC `zk_verifier.ride`, ZK `bridge_deposit.circom` |
+| **Root Cause** | LOW-1 fix widened event_index to u64 in Solana `compute_message_id` but not in RIDE/ZK |
+| **Impact** | Phase 2 ZK minting produces mismatched message_ids → all ZK verifications fail |
+| **Status** | OPEN — requires fix |
 
-| Category | Tests | Passed |
-|---|---|---|
-| INV-1: Supply ≤ Locked | 3 | 3 |
-| INV-2: Replay Protection | 2 | 2 |
-| INV-3: Burn Proof Required | 2 | 2 |
-| INV-4: Invalid Proof Rejection | 2 | 2 |
-| INV-5: Checkpoint Integrity | 2 | 2 |
-| INV-6: Persistence | 1 | 1 |
-| INV-7: Pause Enforcement | 4 | 4 |
-| INV-8: Rate Limits | 2 | 2 |
-| Randomized Simulation (×4) | 4 | 4 |
-| **Total** | **22** | **22** |
+**Recommended Fix Options:**
 
-### 7.2 Simulation Statistics (per run, 10,000 operations)
+**Option A (Preferred):** Update RIDE and ZK circuit to use 8-byte event_index:
+- `zk_verifier.ride`: Change `intToLE4(eventIndex)` → `intToLE8(eventIndex)` in `computeMessageId`
+- `bridge_deposit.circom`: Change `event_index_bits[32]` → `event_index_bits[64]`, update `PREIMAGE_BITS` from 1448 to 1480
+- Requires recompiling the ZK circuit and generating a new trusted setup
 
-| Metric | Run 1 | Run 2 | Run 3 | Run 4 |
-|---|---|---|---|---|
-| Deposits | ~690 | ~680 | ~710 | ~695 |
-| Mints | ~91 | ~95 | ~88 | ~93 |
-| Burns | ~508 | ~500 | ~520 | ~510 |
-| Unlocks | ~149 | ~155 | ~145 | ~150 |
-| Replays blocked | ~862 | ~870 | ~855 | ~860 |
-| Invalid proofs blocked | ~98 | ~100 | ~95 | ~102 |
-| Paused operations blocked | ~2791 | ~2800 | ~2780 | ~2795 |
-| Rate-limited operations | ~4 | ~3 | ~5 | ~4 |
-| Expired checkpoints | ~286 | ~280 | ~290 | ~285 |
+**Option B:** Keep RIDE/ZK at 4 bytes, truncate in Solana:
+- `deposit.rs`: Change `&event_index.to_le_bytes()` → `&(event_index as u32).to_le_bytes()` in `compute_message_id` only
+- Storage stays u64 (no truncation risk for ~4B events), only preimage encoding uses 4 bytes
+- No circuit recompilation needed
 
-All 8 invariants held across all 40,000 total simulated operations.
+### Existing Fix: cancelPendingMint Accounting
 
----
-
-## 8. Findings & Recommendations
-
-### 8.1 Confirmed Findings
-
-| ID | Finding | Severity | Invariant | Fix Required? |
-|---|---|---|---|---|
-| FV-1 | Solana `resume` has no timelock (DCC has 100-block delay) | Medium | INV-7 | Yes |
-| FV-2 | `spec/encoding.md` §3.4 incorrectly claims RIDE lacks Keccak256 | Doc | — | Yes |
-| FV-3 | `spec/encoding.md` §5 says `recipient_hash` but code uses raw `recipient` | Doc | — | Yes |
-| FV-4 | No `checked_add()` on Solana accumulator fields | Low | INV-1 | Recommended |
-| FV-5 | `executePendingMint` doesn't re-check rate limits at execution time | Info | INV-8 | Acceptable |
-| FV-6 | `global_nonce` overflow at u64::MAX causes PDA collision (theoretical) | Info | INV-2 | Acceptable |
-
-### 8.2 Detailed Recommendations
-
-**FV-1: Add timelock to Solana resume**
-
-Currently, `emergency.rs` resume only requires `authority` with no delay. A compromised authority key can instantly resume a paused bridge, potentially during an active exploit. Add a time-delayed resume matching the DCC pattern:
-
-```rust
-// Proposed: Store resume_requested_at in BridgeConfig
-pub resume_requested_at: i64,  // 0 = no pending resume
-
-// Require two-step: request_resume → resume (after delay)
-```
-
-**FV-2 & FV-3: Update encoding spec**
-
-Update `spec/encoding.md` §3.4 to remove the incorrect claim about RIDE not having Keccak256. Update §5 to show `recipient_lo`/`recipient_hi` instead of `recipient_hash`.
-
-**FV-4: Use checked arithmetic**
-
-Replace all `+=` accumulator operations in Rust with `checked_add().ok_or(BridgeError::Overflow)?` for defense in depth:
-
-```rust
-config.total_locked = config.total_locked
-    .checked_add(amount)
-    .ok_or(BridgeError::ArithmeticOverflow)?;
-```
-
-### 8.3 Additional Invariants Recommended
-
-Beyond the 8 invariants from prompt2.md, the following should be enforced:
-
-| ID | Invariant | Rationale |
-|---|---|---|
-| INV-9 | `total_unlocked ≤ total_locked` | Prevents unlocking more than was ever deposited |
-| INV-10 | `vault_balance ≥ total_locked - total_unlocked` | Ensures actual vault balance matches accounting |
-| INV-11 | `user.next_nonce` is strictly monotonic | Prevents nonce reuse |
-| INV-12 | `checkpoint.slot` is strictly monotonic | Already enforced; should be documented as invariant |
-| INV-13 | `committee_size ≥ approval_threshold ≥ 2` | Prevents single-signer checkpoint approval |
+| Attribute | Value |
+|-----------|-------|
+| **Severity** | LOW |
+| **Component** | `zk_bridge.ride`, `bridge_controller.ride` |
+| **Issue** | `cancelPendingMint` does not decrement `totalMinted` after HIGH-5 pre-increment |
+| **Impact** | Cancelled large mints permanently inflate `totalMinted` (no funds at risk) |
+| **Status** | OPEN — cosmetic accounting bug |
 
 ---
 
-## 9. Conclusion
+## 9. ASSUMPTIONS
 
-### Invariant Verification Summary
+The following assumptions MUST remain true for invariants to hold:
 
-| Invariant | Holds? | Confidence |
-|---|---|---|
-| INV-1: Supply ≤ Locked | ✅ Yes | High (99%+) — depends on ZK soundness |
-| INV-2: Replay Protection | ✅ Yes | Very High (structural guarantee) |
-| INV-3: Burn-Proof Required | ✅ Yes | High — M-of-N validator honest majority |
-| INV-4: Invalid Proof Rejection | ✅ Yes | Very High (RIDE atomicity guarantee) |
-| INV-5: Checkpoint Integrity | ✅ Yes | High — T-of-N committee honest majority |
-| INV-6: Persistence | ✅ Yes | Very High (on-chain storage guarantee) |
-| INV-7: Pause Enforcement | ✅ Yes | Very High (structural — first guard) |
-| INV-8: Rate Limits | ✅ Yes | High — minor edge case at window boundary |
+| # | Assumption | Required By | If Violated |
+|---|-----------|-------------|-------------|
+| A-1 | Groth16 trusted setup toxic waste destroyed | INV-1, INV-4, INV-5 | Attacker forges proofs → unlimited minting |
+| A-2 | BN128 curve computationally secure | INV-1, INV-4, INV-5 | All ZK proofs breakable |
+| A-3 | < `min_validators` validators compromised | INV-1, INV-3 | Colluding validators approve fake burns/mints |
+| A-4 | Admin/authority keys not compromised | INV-7, INV-8 | Config manipulation, limited by timelocks |
+| A-5 | DCC deployer key is secure | INV-6 | SetScript could replace contract logic |
+| A-6 | Solana/DCC nodes honest (or multi-node) | INV-3 | Fabricated events bypass validators |
+| A-7 | P2P network not fully partitioned | Liveness | Bridge halts (safety preserved) |
+| A-8 | Clocks approximately synchronized | INV-3 | Timestamp-based checks may fail |
+| A-9 | Circom/snarkjs compiler is correct | INV-4 | Circuit-level soundness bugs |
+| A-10 | `min_validators ≥ 3` (enforced on-chain) | INV-1 | Collusion barrier reduced |
+
+---
+
+## 10. ADDITIONAL INVARIANTS THAT SHOULD BE ENFORCED
+
+### PROPOSED INV-9: Monotonic Nonce Invariant
+
+**Statement:** `∀ user: UserState.next_nonce is strictly monotonically increasing`
+
+**Current status:** Enforced via `checked_add(1)` — cannot overflow due to u64 range. ✅
+
+### PROPOSED INV-10: Checkpoint Ordering Invariant
+
+**Statement:** `∀ checkpoint[i], checkpoint[j]: i < j ⟹ slot[i] < slot[j]`
+
+**Current status:** Enforced via `last_checkpoint_slot` ordering check. ✅
+
+### PROPOSED INV-11: Total Locked ≥ Total Unlocked (Solana)
+
+**Statement:** `total_locked ≥ total_unlocked` (no negative vault obligation)
+
+**Current status:** `total_locked` uses `saturating_sub` which can reach 0 but never underflow. If a deployment occurred where unlocks happened before the LOW-2 fix, pre-existing state could have inverted accounting. ⚠️
+
+### PROPOSED INV-12: Cross-Chain Supply Conservation
+
+**Statement:** `vault_balance_SOL / 10 ≥ totalMinted_DCC - totalBurned_DCC`
+
+**Current enforcement:** None — no cross-chain verification compares Solana vault balance to DCC outstanding supply in real-time. The `checkInvariant()` function on DCC only reads local state.
+
+**Recommendation:** Implement a periodic cross-chain invariant check: validators should compare Solana vault balance to DCC outstanding supply and trigger emergency pause if they diverge by more than a safety margin.
+
+### PROPOSED INV-13: VK Immutability
+
+**Statement:** Once `groth16_vk_set = true`, the VK binary MUST never change.
+
+**Current status:** Enforced — `setVerifyingKey` rejects if `isVkSet()`. No `resetVerifyingKey` exists (HIGH-7 fix). ✅
+
+### PROPOSED INV-14: Event Index Serialization Consistency
+
+**Statement:** `event_index` encoding width MUST be identical across Solana, RIDE, and ZK circuit.
+
+**Current status:** **VIOLATED** — see Section 6. Solana uses 8 bytes, RIDE/ZK use 4 bytes.
+
+---
+
+## CONCLUSION
+
+### Invariant Summary
+
+| Invariant | Status | Confidence |
+|-----------|--------|------------|
+| INV-1: Supply ≤ Locked | **HOLDS** | High (under A-1, A-2, A-3, A-4) |
+| INV-2: Single Processing | **HOLDS** | Very High (PDA + @Verifier) |
+| INV-3: Withdrawal After Burn | **HOLDS** | High (under A-3, A-6) |
+| INV-4: Invalid Proofs → No State Change | **HOLDS** | Very High (RIDE atomicity) |
+| INV-5: Checkpoint Integrity | **HOLDS** | High (under A-3) |
+| INV-6: Replay Persistence | **HOLDS** | Very High (on-chain storage) |
+| INV-7: Pause Blocks Operations | **HOLDS** | Very High (exhaustive check) |
+| INV-8: Rate Limits Enforced | **HOLDS** | High (under A-4) |
+
+### New Findings
+
+1. **HIGH — event_index Serialization Mismatch:** The LOW-1 fix introduced a cross-chain encoding inconsistency that breaks Phase 2 ZK minting entirely. **Requires immediate fix** before ZK path deployment.
+
+2. **LOW — cancelPendingMint Accounting:** Cancelled pending mints permanently inflate `totalMinted` counters. No funds at risk but creates inaccurate supply tracking.
 
 ### Overall Assessment
 
-The SOL ↔ DCC ZK bridge protocol is **formally sound** under the following trust assumptions:
-
-1. **ZK Soundness:** Groth16 on BN128 provides ~128-bit security. A Powers-of-Tau ceremony (with at least one honest participant) ensures the CRS is not compromised.
-2. **Honest Majority:** At least T out of N committee members are honest for checkpoint integrity. At least M out of N validators are honest for unlock attestation.
-3. **Cryptographic Hardness:** Keccak256 pre-image and collision resistance hold at the 128/256-bit security levels.
-
-No critical invariant violations were found. The 6 findings (1 Medium, 2 Doc, 1 Low, 2 Info) are all fixable without architectural changes. The 40,000-operation property-based simulation validated all 8 invariants under adversarial random inputs.
+7 of 8 core invariants hold unconditionally under the stated assumptions. The 8th (rate limits) holds under the admin key security assumption. One new serialization inconsistency was discovered that blocks the ZK minting path. The Phase 1 (committee-based) minting path is fully functional and secure.
 
 ---
 
-*Report generated by formal verification analysis per prompt2.md specification.*
+*Formal verification performed March 5, 2026. This analysis is based on source code review and formal reasoning. All findings should be verified independently.*
