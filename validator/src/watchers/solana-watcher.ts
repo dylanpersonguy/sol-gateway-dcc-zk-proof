@@ -29,6 +29,8 @@ export interface SolanaDepositEvent {
   chainId: number;
   signature: string;
   confirmations: number;
+  /** SPL token mint address (base58). Undefined for native SOL deposits. */
+  tokenMint?: string;
 }
 
 export interface SolanaWatcherConfig {
@@ -112,21 +114,11 @@ export class SolanaWatcher extends EventEmitter {
   }
 
   private async subscribeToLogs(): Promise<void> {
-    const filter: LogsFilter = { mentions: [this.programId.toBase58()] };
+    const filter = { mentions: [this.programId.toBase58()] } as unknown as Parameters<typeof this.connection.onLogs>[0];
 
     // Wrap in a promise so we can detect early WS errors
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<void>((resolve) => {
       let resolved = false;
-
-      // Listen for WS errors that fire before the subscription succeeds
-      const errorHandler = (err: any) => {
-        if (!resolved) {
-          resolved = true;
-          this.usePolling = true;
-          this.logger.warn('WebSocket error during logsSubscribe — will use polling', { error: err?.message || err });
-          resolve(); // Don't reject; we handle this gracefully via usePolling flag
-        }
-      };
 
       try {
         this.subscriptionId = this.connection.onLogs(
@@ -255,6 +247,31 @@ export class SolanaWatcher extends EventEmitter {
     this.lastSeenSignature = signatures[0].signature;
   }
 
+  /**
+   * Manually inject a Solana transaction for processing (e.g., to replay missed deposits).
+   */
+  public async injectTransaction(signature: string): Promise<void> {
+    try {
+      const tx = await this.connection.getTransaction(signature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      });
+      if (!tx || !tx.meta?.logMessages) {
+        this.logger.warn('injectTransaction: tx not found or no logs', { signature });
+        return;
+      }
+      const logsObj = {
+        signature,
+        logs: tx.meta.logMessages,
+        err: tx.meta.err,
+      };
+      this.logger.info('Processing injected transaction', { signature: signature.slice(0, 20) + '...', slot: tx.slot });
+      await this.processLogs(logsObj, { slot: tx.slot });
+    } catch (err) {
+      this.logger.error('injectTransaction failed', { signature, error: err });
+    }
+  }
+
   private async processLogs(logs: any, ctx: Context): Promise<void> {
     // Parse BridgeDeposit events from program logs
     const depositEvents = this.parseDepositEvents(logs, ctx.slot);
@@ -316,7 +333,8 @@ export class SolanaWatcher extends EventEmitter {
             continue; // Skip non-deposit events
           }
 
-          const event = this.decodeBridgeDeposit(data.subarray(8), slot, logs.signature);
+          const isSpl = discriminator.equals(BRIDGE_DEPOSIT_SPL_DISC);
+          const event = this.decodeBridgeDeposit(data.subarray(8), slot, logs.signature, isSpl);
           if (event) {
             events.push(event);
           }
@@ -331,25 +349,40 @@ export class SolanaWatcher extends EventEmitter {
 
   private decodeBridgeDeposit(
     data: Buffer,
-    slot: number,
-    signature: string
+    _slot: number,
+    signature: string,
+    isSpl: boolean = false,
   ): SolanaDepositEvent | null {
     try {
-      // BridgeDeposit event layout (after 8-byte Anchor discriminator):
-      //   transfer_id: [u8; 32]     offset 0
-      //   message_id:  [u8; 32]     offset 32
-      //   sender:      Pubkey(32)   offset 64
-      //   recipient:   [u8; 32]     offset 96
-      //   amount:      u64          offset 128
-      //   nonce:       u64          offset 136
-      //   slot:        u64          offset 144
-      //   event_index: u32          offset 152
-      //   timestamp:   i64          offset 156
-      //   src_chain_id: u32         offset 164
-      //   dst_chain_id: u32         offset 168
-      //   asset_id:    Pubkey(32)   offset 172
-      //   Total: 204 bytes
-      if (data.length < 204) return null;
+      // BridgeDeposit (SOL) event layout (after 8-byte discriminator):
+      //   transfer_id: [u8; 32]   @0
+      //   message_id:  [u8; 32]   @32
+      //   sender:      Pubkey     @64
+      //   recipient:   [u8; 32]   @96
+      //   amount:      u64        @128
+      //   nonce:       u64        @136
+      //   slot:        u64        @144
+      //   event_index: u32        @152  (deployed contract uses u32)
+      //   timestamp:   i64        @156
+      //   src_chain_id: u32       @164
+      //   dst_chain_id: u32       @168
+      //   Total: 172 bytes minimum
+      //
+      // BridgeDepositSpl event layout adds spl_mint BEFORE amount:
+      //   transfer_id: [u8; 32]   @0
+      //   message_id:  [u8; 32]   @32
+      //   sender:      Pubkey     @64
+      //   recipient:   [u8; 32]   @96
+      //   spl_mint:    Pubkey     @128  ← SPL ONLY
+      //   amount:      u64        @160
+      //   nonce:       u64        @168
+      //   slot:        u64        @176
+      //   event_index: u32        @184
+      //   timestamp:   i64        @188
+      //   chain_id:    u32        @196
+      //   Total: 200 bytes minimum
+      const minLen = isSpl ? 196 : 172;
+      if (data.length < minLen) return null;
 
       let offset = 0;
 
@@ -365,6 +398,13 @@ export class SolanaWatcher extends EventEmitter {
       const recipientDcc = data.subarray(offset, offset + 32).toString('hex');
       offset += 32;
 
+      // SPL deposits have spl_mint here — capture it
+      let tokenMint: string | undefined;
+      if (isSpl) {
+        tokenMint = new PublicKey(data.subarray(offset, offset + 32)).toBase58();
+        offset += 32;
+      }
+
       const amount = BigInt(data.readBigUInt64LE(offset));
       offset += 8;
 
@@ -377,16 +417,19 @@ export class SolanaWatcher extends EventEmitter {
       const eventIndex = data.readUInt32LE(offset);
       offset += 4;
 
-      const timestamp = Number(data.readBigInt64LE(offset));
+      const timestamp = data.length > offset + 7
+        ? Number(data.readBigInt64LE(offset))
+        : 0;
       offset += 8;
 
-      const srcChainId = data.readUInt32LE(offset);
+      const srcChainId = data.length > offset + 3
+        ? data.readUInt32LE(offset)
+        : 1;
       offset += 4;
 
-      const dstChainId = data.readUInt32LE(offset);
-      offset += 4;
-
-      // asset_id is at offset 172, 32 bytes (not used in relay but logged)
+      const dstChainId = data.length > offset + 3
+        ? data.readUInt32LE(offset)
+        : 42;
 
       return {
         transferId,
@@ -403,6 +446,7 @@ export class SolanaWatcher extends EventEmitter {
         chainId: srcChainId,
         signature,
         confirmations: 0,
+        tokenMint,
       };
     } catch (err) {
       this.logger.debug('Failed to decode BridgeDeposit', { error: err });

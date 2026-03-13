@@ -3,7 +3,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 import dotenv from 'dotenv';
-dotenv.config();
+import path from 'path';
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 export interface ValidatorConfig {
   // ── Node Identity ──
@@ -19,6 +20,8 @@ export interface ValidatorConfig {
   // ── DecentralChain Connection ──
   dccNodeUrl: string;
   dccBridgeContract: string;
+  /** DUSD stablecoin contract — receives mintDusd() calls for USDC/USDT deposits */
+  dccDusdContract: string;
   dccChainId: number;
   dccChainIdChar: string;   // '?' for mainnet (produces 3D... addresses)
   dccSeed: string;           // Validator's DCC seed phrase for signing mints
@@ -93,6 +96,7 @@ export function loadConfig(): ValidatorConfig {
 
     dccNodeUrl: requireEnv('DCC_NODE_URL'),
     dccBridgeContract: requireEnv('DCC_BRIDGE_CONTRACT'),
+    dccDusdContract: process.env.DCC_DUSD_CONTRACT || '3DNgmqL8JGBFTWFL7bB92EdZT2wSA8yNFZW',
     dccChainId: parseInt(process.env.DCC_CHAIN_ID || '63'),
     dccChainIdChar: process.env.DCC_CHAIN_ID_CHAR || '?',
     dccSeed: requireEnv('DCC_VALIDATOR_SEED'),

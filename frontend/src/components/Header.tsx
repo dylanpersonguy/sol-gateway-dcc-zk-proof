@@ -11,11 +11,12 @@ function getPhantomProvider(): any | null {
 }
 
 function WalletButton() {
-  const { publicKey, connected, disconnect, select, wallets } = useWallet();
+  const { publicKey, connected, disconnect, select, wallets, connect, wallet } = useWallet();
   const { setPhantomPubkey } = usePhantom();
   const [showMenu, setShowMenu] = useState(false);
   const [busy, setBusy] = useState(false);
   const [directPubkey, setDirectPubkey] = useState<string | null>(null);
+  const [pendingConnect, setPendingConnect] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Close menu on outside click
@@ -33,8 +34,18 @@ function WalletButton() {
   useEffect(() => {
     if (connected && publicKey) {
       setDirectPubkey(publicKey.toBase58());
+      setPhantomPubkey(publicKey.toBase58());
     }
   }, [connected, publicKey]);
+
+  // After select(), call connect() once the adapter is ready
+  useEffect(() => {
+    if (pendingConnect && wallet && !connected) {
+      connect().catch((err) => {
+        console.error('[wallet] adapter connect error:', err);
+      }).finally(() => setPendingConnect(false));
+    }
+  }, [pendingConnect, wallet, connected, connect]);
 
   const handleConnect = useCallback(async () => {
     console.log('[wallet] handleConnect fired');
@@ -59,9 +70,7 @@ function WalletButton() {
       setDirectPubkey(addr);
       setPhantomPubkey(addr);
       console.log('[wallet] Connected! Address:', addr);
-      // Sync WalletProvider so useWallet().publicKey works everywhere.
-      // In wallet-adapter v0.15.39, select() triggers the provider to call connect()
-      // internally — do NOT call connect() manually here or it throws WalletNotSelectedError.
+      // Sync WalletProvider so useWallet().publicKey + signTransaction work everywhere
       console.log('[wallet] available adapters:', wallets.map(w => w.adapter.name));
       const phantomAdapter = wallets.find(
         w => w.adapter.name === 'Phantom' || w.adapter.name.toLowerCase().includes('phantom')
@@ -69,10 +78,10 @@ function WalletButton() {
       if (phantomAdapter) {
         console.log('[wallet] selecting adapter:', phantomAdapter.adapter.name);
         select(phantomAdapter.adapter.name as any);
-        // WalletProvider will call adapter.connect() internally via its own useEffect.
-        // Phantom is already authorised so it resolves immediately without a popup.
+        // Trigger connect() on next render when adapter is ready
+        setPendingConnect(true);
       } else {
-        console.warn('[wallet] Phantom adapter not found in wallets list — publicKey may be null in other components');
+        console.warn('[wallet] Phantom adapter not found in wallets list — using direct provider only');
       }
     } catch (err: any) {
       console.error('[wallet] connect error:', err?.message ?? err);
@@ -164,9 +173,11 @@ export function Header() {
       <div className="max-w-6xl mx-auto px-4 py-3.5 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="relative">
-            <div className="w-10 h-10 rounded-xl gradient-zk flex items-center justify-center font-bold text-lg text-white shadow-lg shadow-purple-500/20">
-              ⇄
-            </div>
+            <img
+              src="https://avatars.githubusercontent.com/u/75630395?s=200&v=4"
+              alt="DecentralChain"
+              className="w-10 h-10 rounded-xl shadow-lg shadow-purple-500/20"
+            />
             <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-green-500 border-2 border-gray-950 flex items-center justify-center">
               <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
@@ -185,6 +196,20 @@ export function Header() {
         </div>
 
         <div className="flex items-center gap-3">
+          <Link
+            to="/mint-crs"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-800/50 border border-emerald-700/50 hover:bg-emerald-700/50 hover:border-emerald-600/50 transition-colors text-xs text-emerald-300 hover:text-emerald-100 font-medium"
+          >
+            <span className="text-sm">$</span>
+            Mint CRS
+          </Link>
+          <Link
+            to="/mint-dusd"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-800/50 border border-blue-700/50 hover:bg-blue-700/50 hover:border-blue-600/50 transition-colors text-xs text-blue-300 hover:text-blue-100 font-medium"
+          >
+            <span className="text-sm">$</span>
+            Mint DUSD
+          </Link>
           <Link
             to="/docs"
             className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:bg-gray-700/50 hover:border-gray-600/50 transition-colors text-xs text-gray-400 hover:text-gray-200"

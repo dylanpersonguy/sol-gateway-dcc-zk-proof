@@ -27,10 +27,13 @@ export function PhantomProvider({ children }: { children: React.ReactNode }) {
 
   const getPublicKey = useCallback(
     (adapterPubkey: PublicKey | null): PublicKey | null => {
-      if (adapterPubkey) return adapterPubkey;
+      // Always prefer the direct Phantom provider pubkey — it's the source
+      // of truth for which account the user actually connected.
+      // The adapter may lag, fail to sync, or connect a different identity.
       if (phantomPubkey) {
-        try { return new PublicKey(phantomPubkey); } catch { return null; }
+        try { return new PublicKey(phantomPubkey); } catch { /* fall through */ }
       }
+      if (adapterPubkey) return adapterPubkey;
       return null;
     },
     [phantomPubkey]
@@ -38,16 +41,19 @@ export function PhantomProvider({ children }: { children: React.ReactNode }) {
 
   const getSignTransaction = useCallback(
     (adapterSign: SignTxFn): SignTxFn => {
+      // Always use the direct Phantom provider for signing so the signer
+      // matches the pubkey we used as feePayer (both from window.phantom.solana).
+      if (phantomPubkey) {
+        return async (tx: Transaction) => {
+          const w = window as any;
+          const provider = w.phantom?.solana ?? w.solana;
+          if (!provider) throw new Error('Phantom not available');
+          const signed = await provider.signTransaction(tx);
+          return signed;
+        };
+      }
       if (adapterSign) return adapterSign;
-      if (!phantomPubkey) return null;
-      // Return a function that signs via window.phantom.solana directly
-      return async (tx: Transaction) => {
-        const w = window as any;
-        const provider = w.phantom?.solana ?? w.solana;
-        if (!provider) throw new Error('Phantom not available');
-        const signed = await provider.signTransaction(tx);
-        return signed;
-      };
+      return null;
     },
     [phantomPubkey]
   );
