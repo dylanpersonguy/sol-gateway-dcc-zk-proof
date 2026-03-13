@@ -5,9 +5,14 @@ import fs from 'fs';
 import axios from 'axios';
 import { setScript, libs } from '@decentralchain/decentralchain-transactions';
 
-const NODE = 'https://mainnet-node.decentralchain.io';
-const API_KEY = '***REDACTED_API_KEY***';
-const BASE_SEED = '***REDACTED_SEED_PHRASE***';
+import dotenv from 'dotenv';
+dotenv.config();
+
+function required(name) { const v = process.env[name]; if (!v) { console.error(`Missing env var: ${name}`); process.exit(1); } return v; }
+
+const NODE = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
+const API_KEY = required('DCC_API_KEY');
+const BASE_SEED = required('DCC_VALIDATOR_SEED');
 const { seedWithNonce, publicKey, privateKey } = libs.crypto;
 const B_SEED = seedWithNonce(BASE_SEED, 2);
 const B_SIGNER = { privateKey: privateKey(B_SEED) };

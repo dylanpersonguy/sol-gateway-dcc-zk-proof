@@ -67,7 +67,7 @@ export function BridgeInterface() {
             { icon: '⬡', label: 'Validate', desc: 'M-of-N checkpoint' },
             { icon: 'π', label: 'ZK Prove', desc: 'Groth16 proof gen' },
             { icon: '✓', label: 'Verify', desc: 'On-chain verification' },
-            { icon: '⊕', label: 'Mint', desc: 'wSOL.DCC issued' },
+            { icon: '⊕', label: 'Mint', desc: 'Wrapped tokens issued' },
           ].map((step, i) => (
             <React.Fragment key={step.label}>
               <div className="flex-1 min-w-0">

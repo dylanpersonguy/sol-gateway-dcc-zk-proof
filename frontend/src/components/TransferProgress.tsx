@@ -371,9 +371,18 @@ export function TransferProgress() {
 
   const useZk = activeTransfer.useZk ?? parseFloat(activeTransfer.amount) >= ZK_THRESHOLD_SOL;
 
-  const steps = activeTransfer.direction === 'sol_to_dcc'
+  const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+  const isDusd = activeTransfer.splMint === USDC_MINT || activeTransfer.splMint === USDT_MINT;
+  const mintLabel = isDusd ? 'Minting DUSD' : `Minting ${token.wrappedSymbol}.DCC`;
+  const mintDesc = isDusd ? 'Issuing DUSD stablecoin 1:1 on DecentralChain' : 'Issuing wrapped tokens on DecentralChain';
+
+  const steps = (activeTransfer.direction === 'sol_to_dcc'
     ? (useZk ? STEPS_SOL_TO_DCC_ZK : STEPS_SOL_TO_DCC_COMMITTEE)
-    : (useZk ? STEPS_DCC_TO_SOL_ZK : STEPS_DCC_TO_SOL_COMMITTEE);
+    : (useZk ? STEPS_DCC_TO_SOL_ZK : STEPS_DCC_TO_SOL_COMMITTEE))
+    .map(s => s.key === 'minting' && activeTransfer.direction === 'sol_to_dcc'
+      ? { ...s, label: mintLabel, description: mintDesc }
+      : s);
   const mappedStatus = mapStatus(activeTransfer.status);
   const currentStepIdx = Math.max(0, steps.findIndex((s) => s.key === mappedStatus));
   const isComplete = mappedStatus === 'completed';

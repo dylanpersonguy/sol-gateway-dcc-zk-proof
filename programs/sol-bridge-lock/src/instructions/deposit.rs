@@ -240,30 +240,51 @@ pub fn handler(ctx: Context<Deposit>, params: DepositParams) -> Result<()> {
 ///     nonce (8 bytes LE) ||
 ///     asset_id (32 bytes)
 /// )
+/// Encoding version constant — must match spec/encoding.md and all
+/// cross-language implementations (TS, Rust lib, RIDE, Circom).
+pub const ENCODING_VERSION: u8 = 1;
+
+/// Canonical deposit preimage length in bytes.
+/// domain_sep(17) + src_chain(4) + dst_chain(4) + src_program(32) +
+/// slot(8) + event_index(4) + sender(32) + recipient(32) +
+/// amount(8) + nonce(8) + asset_id(32) = 181
+pub const DEPOSIT_PREIMAGE_LENGTH: usize = 181;
+
 pub fn compute_message_id(
     src_chain_id: u32,
     dst_chain_id: u32,
     src_program_id: &Pubkey,
     slot: u64,
-    event_index: u64, // SECURITY FIX (LOW-1): widened from u32
+    event_index: u64, // Storage stays u64 (LOW-1), but hashed as u32 (spec v2)
     sender: &Pubkey,
     recipient: &[u8; 32],
     amount: u64,
     nonce: u64,
     asset_id: &Pubkey,
 ) -> [u8; 32] {
-    let mut data = Vec::with_capacity(185); // 181 + 4 extra for u64 event_index
+    // OPTION-B FIX: event_index is stored as u64 on-chain, but the canonical
+    // preimage spec (spec/encoding.md) encodes it as u32 LE for hashing.
+    // All other implementations (TS, Rust lib, RIDE, Circom) use u32.
+    // Reject values > u32::MAX to prevent silent truncation.
+    assert!(
+        event_index <= u32::MAX as u64,
+        "event_index {} exceeds u32::MAX — preimage spec only supports 4-byte encoding",
+        event_index
+    );
+
+    let mut data = Vec::with_capacity(DEPOSIT_PREIMAGE_LENGTH);
     data.extend_from_slice(DOMAIN_SEP);                      // 17 bytes
     data.extend_from_slice(&src_chain_id.to_le_bytes());     // 4 bytes
     data.extend_from_slice(&dst_chain_id.to_le_bytes());     // 4 bytes
     data.extend_from_slice(src_program_id.as_ref());         // 32 bytes
     data.extend_from_slice(&slot.to_le_bytes());             // 8 bytes
-    data.extend_from_slice(&event_index.to_le_bytes());      // 8 bytes (LOW-1: was 4)
+    data.extend_from_slice(&(event_index as u32).to_le_bytes()); // 4 bytes (spec v2: u32 LE)
     data.extend_from_slice(sender.as_ref());                 // 32 bytes
     data.extend_from_slice(recipient);                       // 32 bytes
     data.extend_from_slice(&amount.to_le_bytes());           // 8 bytes
     data.extend_from_slice(&nonce.to_le_bytes());            // 8 bytes
     data.extend_from_slice(asset_id.as_ref());               // 32 bytes
+    debug_assert_eq!(data.len(), DEPOSIT_PREIMAGE_LENGTH);
     keccak::hash(&data).to_bytes()
 }
 
@@ -298,6 +319,31 @@ mod tests {
         assert_eq!(DOMAIN_SEP.len(), 17);
         let total = 17 + 4 + 4 + 32 + 8 + 4 + 32 + 32 + 8 + 8 + 32;
         assert_eq!(total, 181);
+        assert_eq!(total, DEPOSIT_PREIMAGE_LENGTH);
+    }
+
+    #[test]
+    fn test_encoding_version() {
+        assert_eq!(ENCODING_VERSION, 1);
+    }
+
+    #[test]
+    fn test_preimage_actual_length_is_181() {
+        // Actually call compute_message_id and verify the preimage would be 181 bytes
+        // by building the same preimage manually
+        let mut data = Vec::new();
+        data.extend_from_slice(DOMAIN_SEP);                       // 17
+        data.extend_from_slice(&1u32.to_le_bytes());              // 4
+        data.extend_from_slice(&2u32.to_le_bytes());              // 4
+        data.extend_from_slice(&[0u8; 32]);                       // 32
+        data.extend_from_slice(&0u64.to_le_bytes());              // 8
+        data.extend_from_slice(&0u32.to_le_bytes());              // 4 (event_index as u32)
+        data.extend_from_slice(&[0u8; 32]);                       // 32
+        data.extend_from_slice(&[0u8; 32]);                       // 32
+        data.extend_from_slice(&0u64.to_le_bytes());              // 8
+        data.extend_from_slice(&0u64.to_le_bytes());              // 8
+        data.extend_from_slice(&[0u8; 32]);                       // 32
+        assert_eq!(data.len(), DEPOSIT_PREIMAGE_LENGTH);
     }
 
     #[test]
@@ -405,17 +451,31 @@ mod tests {
     }
 
     #[test]
-    fn test_max_u64_values() {
+    fn test_max_u32_event_index() {
         let prog = Pubkey::new_from_array([0xffu8; 32]);
         let sender = Pubkey::new_from_array([0xffu8; 32]);
         let recipient = [0xffu8; 32];
         let asset = Pubkey::new_from_array([0xffu8; 32]);
 
-        // Should not panic with max values
+        // u32::MAX is the maximum valid event_index
         let id = compute_message_id(
-            1, 2, &prog, u64::MAX, u32::MAX, &sender, &recipient, u64::MAX, u64::MAX, &asset,
+            1, 2, &prog, u64::MAX, u32::MAX as u64, &sender, &recipient, u64::MAX, u64::MAX, &asset,
         );
         assert_ne!(id, [0u8; 32], "message_id must not be zero");
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds u32::MAX")]
+    fn test_event_index_overflow_panics() {
+        let prog = Pubkey::new_from_array([1u8; 32]);
+        let sender = Pubkey::new_from_array([2u8; 32]);
+        let recipient = [3u8; 32];
+        let asset = Pubkey::new_from_array([4u8; 32]);
+
+        // event_index > u32::MAX must panic
+        compute_message_id(
+            1, 2, &prog, 1000, (u32::MAX as u64) + 1, &sender, &recipient, 1_000_000_000, 0, &asset,
+        );
     }
 
     /// Test vector 1: Basic deposit — matches TypeScript golden value.

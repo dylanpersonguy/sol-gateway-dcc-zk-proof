@@ -8,10 +8,14 @@ const { createRequire } = require('module');
 const _require = createRequire(require.resolve('@decentralchain/decentralchain-transactions'));
 const libs = _require('./dist/index');
 
-const NODE = 'https://mainnet-node.decentralchain.io';
-const API_KEY = '***REDACTED_API_KEY***';
-const BASE_SEED = '***REDACTED_SEED_PHRASE***';
-const CHAIN_ID = 63;
+require('dotenv').config();
+
+function required(name) { const v = process.env[name]; if (!v) { console.error(`Missing env var: ${name}`); process.exit(1); } return v; }
+
+const NODE = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
+const API_KEY = required('DCC_API_KEY');
+const BASE_SEED = required('DCC_VALIDATOR_SEED');
+const CHAIN_ID = Number(process.env.DCC_CHAIN_ID) || 63;
 
 async function main() {
   const { seedWithNonce, address } = libs.crypto;

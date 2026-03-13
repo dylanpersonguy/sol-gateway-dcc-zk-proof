@@ -3,7 +3,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 import dotenv from 'dotenv';
-dotenv.config();
+import path from 'path';
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 export interface ValidatorConfig {
   // ── Node Identity ──
@@ -19,6 +20,8 @@ export interface ValidatorConfig {
   // ── DecentralChain Connection ──
   dccNodeUrl: string;
   dccBridgeContract: string;
+  /** DUSD stablecoin contract — receives mintDusd() calls for USDC/USDT deposits */
+  dccDusdContract: string;
   dccChainId: number;
   dccChainIdChar: string;   // '?' for mainnet (produces 3D... addresses)
   dccSeed: string;           // Validator's DCC seed phrase for signing mints
@@ -71,6 +74,14 @@ export interface ValidatorConfig {
   zkVkeyPath: string;
   zkCheckpointWindowMs: number;
   zkMaxEventsPerCheckpoint: number;
+
+  // ── Beta Safety Caps ──
+  /** Threshold in lamports above which ZK proof is REQUIRED (committee alone rejected) */
+  zkOnlyThresholdLamports: bigint;
+  /** Kill switch: if true, ZK proof path is completely disabled */
+  disableZkPath: boolean;
+  /** If true, block startup unless all RELEASE_GUARD prerequisites are met */
+  fullProduction: boolean;
 }
 
 export function loadConfig(): ValidatorConfig {
@@ -85,6 +96,7 @@ export function loadConfig(): ValidatorConfig {
 
     dccNodeUrl: requireEnv('DCC_NODE_URL'),
     dccBridgeContract: requireEnv('DCC_BRIDGE_CONTRACT'),
+    dccDusdContract: process.env.DCC_DUSD_CONTRACT || '3DNgmqL8JGBFTWFL7bB92EdZT2wSA8yNFZW',
     dccChainId: parseInt(process.env.DCC_CHAIN_ID || '63'),
     dccChainIdChar: process.env.DCC_CHAIN_ID_CHAR || '?',
     dccSeed: requireEnv('DCC_VALIDATOR_SEED'),
@@ -130,6 +142,11 @@ export function loadConfig(): ValidatorConfig {
     zkVkeyPath: process.env.ZK_VKEY_PATH || 'zk/circuits/build/verification_key.json',
     zkCheckpointWindowMs: parseInt(process.env.ZK_CHECKPOINT_WINDOW_MS || '60000'),
     zkMaxEventsPerCheckpoint: parseInt(process.env.ZK_MAX_EVENTS_PER_CHECKPOINT || '100'),
+
+    // Beta Safety Caps
+    zkOnlyThresholdLamports: BigInt(process.env.ZK_ONLY_THRESHOLD_LAMPORTS || '0'),
+    disableZkPath: process.env.DISABLE_ZK_PATH === 'true',
+    fullProduction: process.env.FULL_PRODUCTION === 'true',
   };
 }
 

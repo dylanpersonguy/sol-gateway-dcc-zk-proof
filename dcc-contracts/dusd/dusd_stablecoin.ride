@@ -1,0 +1,583 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+# ═══════════════════════════════════════════════════════════════
+# Decentral USD (DUSD) — Stablecoin Contract
+# ═══════════════════════════════════════════════════════════════
+#
+# A unified stablecoin backed 1:1 by USDC/USDT reserves locked on
+# Solana.  Users deposit USDC or USDT via the SOL↔DCC bridge,
+# and receive DUSD on DecentralChain.  Redeeming burns DUSD and
+# unlocks the USDC/USDT collateral on Solana.
+#
+# Unlike the bridge controller (which creates separate wrapped tokens
+# per SPL mint), this contract issues a SINGLE "DUSD" asset backed
+# by a shared USDC + USDT pool.
+#
+# Token minting/burning is ONLY callable by the bridge controller
+# or registered validators after a valid deposit is confirmed.
+#
+# DCC RIDE script v5 compatible.
+
+let contractVersion = "1.0.0"
+let dusdDecimals = 6                      # Match USDC/USDT
+let dusdName = "Decentral USD"
+let dusdDescription = "Decentral USD (DUSD) — stablecoin backed 1:1 by USDC/USDT reserves locked on Solana via sol-gateway-dcc"
+let domainSeparator = "SOL_DCC_DUSD_V1"
+
+# Accepted backing: Solana SPL mint addresses
+let usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+let usdtMint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
+# Rate limits
+let maxDailyMint  = 10000000000000   # $10 000 000 daily
+let maxSingleMint = 1000000000000    # $1 000 000 single
+let minMintAmount = 1000000          # $1 minimum (6 decimals)
+let rateLimitWindow = 1440           # ~1 day in blocks
+let largeTxThreshold  = 500000000000 # $500 000 → delayed
+let largeTxDelayBlocks = 60
+
+# ═══════════════════════════════════════════════════════════════
+# STATE KEYS
+# ═══════════════════════════════════════════════════════════════
+
+func keyAdmin()              = "admin"
+func keyGuardian()           = "guardian"
+func keyPaused()             = "paused"
+func keyDusdAssetId()        = "dusd_asset_id"
+func keyBridgeController()   = "bridge_controller"
+func keyTotalMinted()        = "total_minted"
+func keyTotalBurned()        = "total_burned"
+func keyGlobalNonce()        = "global_nonce"
+func keyValidatorCount()     = "validator_count"
+func keyMinValidators()      = "min_validators"
+func keyDailyMinted()        = "daily_minted"
+func keyDailyResetHeight()   = "daily_reset_height"
+
+# Per-collateral tracking
+func keyCollateralMinted(splMint: String)  = "collateral_minted_" + splMint
+func keyCollateralBurned(splMint: String)  = "collateral_burned_" + splMint
+
+# Validators
+func keyValidator(index: Int) = "validator_" + index.toString()
+func keyValidatorActive(pubkey: String) = "validator_active_" + pubkey
+
+# Replay protection
+func keyProcessedTransfer(transferId: String) = "processed_" + transferId
+func keyPendingLargeTx(transferId: String) = "pending_large_" + transferId
+func keyPendingLargeTxHeight(transferId: String) = "pending_large_height_" + transferId
+func keyBurnRecord(burnId: String) = "burn_" + burnId
+func keyBurnNonce(address: String) = "burn_nonce_" + address
+
+# Emergency / admin keys (must be declared before @Callable)
+func keyResumeRequestedAt() = "resume_requested_at"
+let resumeDelayBlocks = 100
+func keyPendingAdmin() = "pending_admin"
+func keyAdminTransferHeight() = "admin_transfer_height"
+let adminTransferDelay = 100
+
+# ═══════════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+func isAdmin(caller: Address) = {
+    let admin = getStringValue(this, keyAdmin())
+    caller.toString() == admin
+}
+
+func isGuardian(caller: Address) = {
+    let guardian = getStringValue(this, keyGuardian())
+    caller.toString() == guardian
+}
+
+func isPaused() = {
+    getBooleanValue(this, keyPaused())
+}
+
+func getValidatorCount() = {
+    getIntegerValue(this, keyValidatorCount())
+}
+
+func getMinValidators() = {
+    getIntegerValue(this, keyMinValidators())
+}
+
+func isValidatorActive(pubkey: String) = {
+    match getBoolean(this, keyValidatorActive(pubkey)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func isTransferProcessed(transferId: String) = {
+    match getBoolean(this, keyProcessedTransfer(transferId)) {
+        case b: Boolean => b
+        case _ => false
+    }
+}
+
+func isAcceptedCollateral(splMint: String) = {
+    splMint == usdcMint || splMint == usdtMint
+}
+
+# Canonical message for signature verification
+func constructMintMessage(
+    transferId: String,
+    recipient: String,
+    amount: Int,
+    solSlot: Int,
+    splMint: String
+) = {
+    domainSeparator + "|MINT_DUSD|" +
+    transferId + "|" +
+    recipient + "|" +
+    amount.toString() + "|" +
+    solSlot.toString() + "|" +
+    splMint
+}
+
+# Verify M-of-N validator signatures (max 5 validators)
+func verifyValidatorSignatures(
+    message: ByteVector,
+    signatures: List[ByteVector],
+    pubkeys: List[ByteVector],
+    minRequired: Int
+) = {
+    let count = size(signatures)
+    if (count < minRequired) then throw("Insufficient signatures")
+    else if (count != size(pubkeys)) then throw("Signatures/pubkeys length mismatch")
+    else if (count > 5) then throw("Max 5 validators supported")
+    else {
+        func verifyOne(acc: Int, idx: Int) = {
+            if (idx >= count) then acc
+            else {
+                let pubkeyStr = toBase58String(pubkeys[idx])
+                if (!isValidatorActive(pubkeyStr)) then throw("Validator not active: " + pubkeyStr)
+                else if (!sigVerify(message, signatures[idx], pubkeys[idx])) then throw("Invalid signature from: " + pubkeyStr)
+                else acc + 1
+            }
+        }
+        
+        # Check for duplicate pubkeys (simple pairwise for max 5)
+        let noPubDup = if (count >= 2 && pubkeys[0] == pubkeys[1]) then throw("Duplicate pubkey")
+            else if (count >= 3 && (pubkeys[0] == pubkeys[2] || pubkeys[1] == pubkeys[2])) then throw("Duplicate pubkey")
+            else if (count >= 4 && (pubkeys[0] == pubkeys[3] || pubkeys[1] == pubkeys[3] || pubkeys[2] == pubkeys[3])) then throw("Duplicate pubkey")
+            else if (count >= 5 && (pubkeys[0] == pubkeys[4] || pubkeys[1] == pubkeys[4] || pubkeys[2] == pubkeys[4] || pubkeys[3] == pubkeys[4])) then throw("Duplicate pubkey")
+            else true
+        
+        if (noPubDup) then {
+            let valid = FOLD<5>([0,1,2,3,4], 0, verifyOne)
+            if (valid < minRequired) then throw("Valid signatures below threshold")
+            else true
+        }
+        else false
+    }
+}
+
+# Daily rate limit check
+func checkDailyLimit(amount: Int) = {
+    let currentHeight = height
+    let resetHeight = match getInteger(this, keyDailyResetHeight()) {
+        case h: Int => h
+        case _ => 0
+    }
+    let dailyMinted = if (currentHeight - resetHeight >= rateLimitWindow) then 0
+        else match getInteger(this, keyDailyMinted()) {
+            case m: Int => m
+            case _ => 0
+        }
+    
+    if (dailyMinted + amount > maxDailyMint) then throw("DUSD daily mint limit exceeded")
+    else {
+        let newResetHeight = if (currentHeight - resetHeight >= rateLimitWindow) then currentHeight
+            else resetHeight
+        (dailyMinted + amount, newResetHeight)
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# INITIALIZE
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func initialize(
+    guardian: String,
+    bridgeController: String,
+    minValidators: Int
+) = {
+    if (isDefined(getString(this, keyAdmin()))) then throw("Already initialized")
+    else if (minValidators < 1) then throw("Min validators must be >= 1")
+    else {
+        let dusdIssue = Issue(dusdName, dusdDescription, 0, dusdDecimals, true)
+        let dusdAssetId = toBase58String(calculateAssetId(dusdIssue))
+        [
+            dusdIssue,
+            StringEntry(keyAdmin(), i.caller.toString()),
+            StringEntry(keyGuardian(), guardian),
+            StringEntry(keyBridgeController(), bridgeController),
+            BooleanEntry(keyPaused(), false),
+            StringEntry(keyDusdAssetId(), dusdAssetId),
+            IntegerEntry(keyTotalMinted(), 0),
+            IntegerEntry(keyTotalBurned(), 0),
+            IntegerEntry(keyGlobalNonce(), 0),
+            IntegerEntry(keyValidatorCount(), 0),
+            IntegerEntry(keyMinValidators(), minValidators),
+            IntegerEntry(keyDailyMinted(), 0),
+            IntegerEntry(keyDailyResetHeight(), height),
+            IntegerEntry(keyCollateralMinted(usdcMint), 0),
+            IntegerEntry(keyCollateralMinted(usdtMint), 0),
+            IntegerEntry(keyCollateralBurned(usdcMint), 0),
+            IntegerEntry(keyCollateralBurned(usdtMint), 0)
+        ]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# VALIDATORS
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func registerValidator(pubkeyBase58: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (isValidatorActive(pubkeyBase58)) then throw("Validator already active")
+    else {
+        let count = getValidatorCount()
+        if (count >= 20) then throw("Max validators reached")
+        else {
+            [
+                StringEntry(keyValidator(count), pubkeyBase58),
+                BooleanEntry(keyValidatorActive(pubkeyBase58), true),
+                IntegerEntry(keyValidatorCount(), count + 1)
+            ]
+        }
+    }
+}
+
+@Callable(i)
+func removeValidator(pubkeyBase58: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else if (!isValidatorActive(pubkeyBase58)) then throw("Validator not active")
+    else {
+        let count = getValidatorCount()
+        let minVal = getMinValidators()
+        if (count - 1 < minVal) then throw("Would breach minimum validator threshold")
+        else {
+            [
+                BooleanEntry(keyValidatorActive(pubkeyBase58), false),
+                IntegerEntry(keyValidatorCount(), count - 1)
+            ]
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# MINT DUSD — Deposit USDC/USDT on SOL → receive DUSD on DCC
+# ═══════════════════════════════════════════════════════════════
+#
+# Validators call this after confirming a USDC/USDT deposit on Solana.
+# splMint: must be USDC or USDT mint address
+# amount:  in smallest units (6 decimals — 1 USDC = 1_000_000)
+# DUSD is minted 1:1 (same 6 decimals).
+
+@Callable(i)
+func mintDusd(
+    transferId: String,
+    recipient: String,
+    amount: Int,
+    solSlot: Int,
+    splMint: String,
+    signatures: List[ByteVector],
+    pubkeys: List[ByteVector]
+) = {
+    if (isPaused()) then throw("DUSD contract is paused")
+    else if (isTransferProcessed(transferId)) then throw("Transfer already processed: " + transferId)
+    else if (!isAcceptedCollateral(splMint)) then throw("Only USDC and USDT accepted as collateral")
+    else if (amount < minMintAmount) then throw("Amount below minimum ($1)")
+    else if (amount > maxSingleMint) then throw("Single mint limit exceeded")
+    else {
+        let minRequired = getMinValidators()
+        if (size(signatures) < minRequired) then throw("Insufficient signatures")
+        else if (!verifyValidatorSignatures(
+            toBytes(constructMintMessage(transferId, recipient, amount, solSlot, splMint)),
+            signatures, pubkeys, minRequired
+        )) then throw("Invalid validator signatures")
+        else {
+            let (newDailyMinted, newResetHeight) = checkDailyLimit(amount)
+            
+            let dusdAssetId = getStringValue(this, keyDusdAssetId())
+            # 1:1 mint — USDC/USDT have 6 decimals, DUSD has 6 decimals
+            let mintAmount = amount
+
+            let recipientAddr = addressFromStringValue(recipient)
+            let nonce = getIntegerValue(this, keyGlobalNonce())
+            let totalMinted = getIntegerValue(this, keyTotalMinted())
+            let collateralMinted = match getInteger(this, keyCollateralMinted(splMint)) {
+                case m: Int => m
+                case _ => 0
+            }
+            
+            if (amount >= largeTxThreshold) then {
+                # Large TX: queue for delayed execution
+                [
+                    BooleanEntry(keyPendingLargeTx(transferId), true),
+                    IntegerEntry(keyPendingLargeTxHeight(transferId), height),
+                    StringEntry("pending_recipient_" + transferId, recipient),
+                    IntegerEntry("pending_amount_" + transferId, mintAmount),
+                    StringEntry("pending_spl_mint_" + transferId, splMint),
+                    BooleanEntry(keyProcessedTransfer(transferId), true),
+                    IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                    IntegerEntry(keyCollateralMinted(splMint), collateralMinted + mintAmount),
+                    IntegerEntry(keyGlobalNonce(), nonce + 1),
+                    IntegerEntry(keyDailyMinted(), newDailyMinted),
+                    IntegerEntry(keyDailyResetHeight(), newResetHeight)
+                ]
+            }
+            else {
+                [
+                    BooleanEntry(keyProcessedTransfer(transferId), true),
+                    Reissue(fromBase58String(dusdAssetId).value(), mintAmount, true),
+                    ScriptTransfer(recipientAddr, mintAmount, fromBase58String(dusdAssetId).value()),
+                    IntegerEntry(keyTotalMinted(), totalMinted + mintAmount),
+                    IntegerEntry(keyCollateralMinted(splMint), collateralMinted + mintAmount),
+                    IntegerEntry(keyGlobalNonce(), nonce + 1),
+                    IntegerEntry(keyDailyMinted(), newDailyMinted),
+                    IntegerEntry(keyDailyResetHeight(), newResetHeight)
+                ]
+            }
+        }
+    }
+}
+
+# Execute delayed large mint
+@Callable(i)
+func executePendingMint(transferId: String) = {
+    if (isPaused()) then throw("DUSD contract is paused")
+    else {
+        let isPending = match getBoolean(this, keyPendingLargeTx(transferId)) {
+            case b: Boolean => b
+            case _ => false
+        }
+        if (!isPending) then throw("No pending transaction: " + transferId)
+        else {
+            let scheduledHeight = getIntegerValue(this, keyPendingLargeTxHeight(transferId))
+            if (height - scheduledHeight < largeTxDelayBlocks) then 
+                throw("Delay not elapsed. Wait " + (largeTxDelayBlocks - (height - scheduledHeight)).toString() + " more blocks")
+            else {
+                let recipient = getStringValue(this, "pending_recipient_" + transferId)
+                let amount = getIntegerValue(this, "pending_amount_" + transferId)
+                let dusdAssetId = getStringValue(this, keyDusdAssetId())
+                let recipientAddr = addressFromStringValue(recipient)
+                
+                [
+                    DeleteEntry(keyPendingLargeTx(transferId)),
+                    DeleteEntry(keyPendingLargeTxHeight(transferId)),
+                    DeleteEntry("pending_recipient_" + transferId),
+                    DeleteEntry("pending_amount_" + transferId),
+                    DeleteEntry("pending_spl_mint_" + transferId),
+                    Reissue(fromBase58String(dusdAssetId).value(), amount, true),
+                    ScriptTransfer(recipientAddr, amount, fromBase58String(dusdAssetId).value())
+                ]
+            }
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# BURN DUSD — Redeem DUSD → unlock USDC/USDT on Solana
+# ═══════════════════════════════════════════════════════════════
+#
+# User attaches DUSD and specifies which collateral to receive
+# (USDC or USDT) and their Solana recipient address.
+
+@Callable(i)
+func burnDusd(solRecipient: String, outputMint: String) = {
+    if (isPaused()) then throw("DUSD contract is paused")
+    else if (!isAcceptedCollateral(outputMint)) then throw("Output must be USDC or USDT mint address")
+    else {
+        let dusdAssetId = getStringValue(this, keyDusdAssetId())
+        let payment = i.payments[0]
+        
+        if (!isDefined(payment.assetId)) then throw("Must attach DUSD token")
+        else if (toBase58String(payment.assetId.value()) != dusdAssetId) then throw("Wrong token — must attach DUSD")
+        else if (payment.amount < minMintAmount) then throw("Burn amount below minimum ($1)")
+        else {
+            let userNonce = match getInteger(this, keyBurnNonce(i.caller.toString())) {
+                case n: Int => n
+                case _ => 0
+            }
+            let totalBurned = getIntegerValue(this, keyTotalBurned())
+            let collateralBurned = match getInteger(this, keyCollateralBurned(outputMint)) {
+                case b: Int => b
+                case _ => 0
+            }
+            
+            let burnId = toBase58String(sha256(
+                i.caller.bytes + 
+                userNonce.toBytes() + 
+                height.toBytes() + 
+                payment.amount.toBytes()
+            ))
+            
+            # Replay protection
+            if (isDefined(getString(this, keyBurnRecord(burnId)))) then throw("Burn already processed: " + burnId)
+            else
+
+            [
+                Burn(payment.assetId.value(), payment.amount),
+                StringEntry(keyBurnRecord(burnId), 
+                    i.caller.toString() + "|" + 
+                    solRecipient + "|" + 
+                    outputMint + "|" +
+                    payment.amount.toString() + "|" + 
+                    height.toString() + "|" +
+                    lastBlock.timestamp.toString()
+                ),
+                IntegerEntry(keyTotalBurned(), totalBurned + payment.amount),
+                IntegerEntry(keyCollateralBurned(outputMint), collateralBurned + payment.amount),
+                IntegerEntry(keyBurnNonce(i.caller.toString()), userNonce + 1)
+            ]
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# EMERGENCY CONTROLS
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func emergencyPause() = {
+    if (!isAdmin(i.caller) && !isGuardian(i.caller)) then throw("Unauthorized")
+    else {
+        [BooleanEntry(keyPaused(), true)]
+    }
+}
+
+@Callable(i)
+func requestResume() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can request resume")
+    else if (!isPaused()) then throw("Contract is not paused")
+    else {
+        [IntegerEntry(keyResumeRequestedAt(), height)]
+    }
+}
+
+@Callable(i)
+func executeResume() = {
+    if (!isAdmin(i.caller)) then throw("Only admin can execute resume")
+    else if (!isPaused()) then throw("Contract is not paused")
+    else {
+        let requestedAt = match getInteger(this, keyResumeRequestedAt()) {
+            case h: Int => h
+            case _ => throw("No resume request pending — call requestResume first")
+        }
+        if (requestedAt == 0) then throw("No resume request pending")
+        else if (height - requestedAt < resumeDelayBlocks) then
+            throw("Resume delay not elapsed. Wait " + (resumeDelayBlocks - (height - requestedAt)).toString() + " more blocks")
+        else {
+            [
+                BooleanEntry(keyPaused(), false),
+                DeleteEntry(keyResumeRequestedAt())
+            ]
+        }
+    }
+}
+
+@Callable(i)
+func cancelPendingMint(transferId: String) = {
+    if (!isAdmin(i.caller) && !isGuardian(i.caller)) then throw("Unauthorized")
+    else {
+        let pendingAmount = match getInteger(this, "pending_amount_" + transferId) {
+            case a: Int => a
+            case _ => 0
+        }
+        let pendingSplMint = match getString(this, "pending_spl_mint_" + transferId) {
+            case s: String => s
+            case _ => ""
+        }
+        let decrementEntries = if (pendingAmount > 0) then {
+            let totalMinted = getIntegerValue(this, keyTotalMinted())
+            let collateralEntries = if (pendingSplMint != "") then {
+                let collateralMinted = match getInteger(this, keyCollateralMinted(pendingSplMint)) {
+                    case m: Int => m
+                    case _ => 0
+                }
+                [IntegerEntry(keyCollateralMinted(pendingSplMint), collateralMinted - pendingAmount)]
+            } else []
+            [IntegerEntry(keyTotalMinted(), totalMinted - pendingAmount)] ++ collateralEntries
+        } else []
+
+        [
+            DeleteEntry(keyPendingLargeTx(transferId)),
+            DeleteEntry(keyPendingLargeTxHeight(transferId)),
+            DeleteEntry("pending_recipient_" + transferId),
+            DeleteEntry("pending_amount_" + transferId),
+            DeleteEntry("pending_spl_mint_" + transferId)
+        ] ++ decrementEntries
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# CONFIG / ADMIN
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func transferAdmin(newAdmin: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [
+            StringEntry(keyPendingAdmin(), newAdmin),
+            IntegerEntry(keyAdminTransferHeight(), height)
+        ]
+    }
+}
+
+@Callable(i)
+func acceptAdmin() = {
+    let pendingAdmin = match getString(this, keyPendingAdmin()) {
+        case s: String => s
+        case _ => throw("No pending admin transfer")
+    }
+    if (i.caller.toString() != pendingAdmin) then throw("Only pending admin can accept")
+    else {
+        let proposedHeight = getIntegerValue(this, keyAdminTransferHeight())
+        if (height - proposedHeight < adminTransferDelay) then
+            throw("Admin transfer delay not elapsed")
+        else {
+            [
+                StringEntry(keyAdmin(), pendingAdmin),
+                DeleteEntry(keyPendingAdmin()),
+                DeleteEntry(keyAdminTransferHeight())
+            ]
+        }
+    }
+}
+
+@Callable(i)
+func updateGuardian(newGuardian: String) = {
+    if (!isAdmin(i.caller)) then throw("Unauthorized")
+    else {
+        [StringEntry(keyGuardian(), newGuardian)]
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# READ-ONLY VIEWS
+# ═══════════════════════════════════════════════════════════════
+
+@Callable(i)
+func getStats() = {
+    ([], unit)
+}
+
+# ═══════════════════════════════════════════════════════════════
+# VERIFIER — Prevents direct state manipulation
+# ═══════════════════════════════════════════════════════════════
+
+@Verifier(tx)
+func verify() = {
+    match tx {
+        case dt: DataTransaction => false
+        case _ => sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+    }
+}

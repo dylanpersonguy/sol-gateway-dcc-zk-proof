@@ -13,7 +13,9 @@
 // - Peer discovery via gossip protocol
 
 import { EventEmitter } from 'events';
-import { WebSocket, WebSocketServer } from 'ws';
+import WebSocket from 'ws';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { WebSocketServer } = require('ws');
 import { createLogger } from '../utils/logger';
 import { Logger } from 'winston';
 import * as nacl from 'tweetnacl';
@@ -56,7 +58,7 @@ interface PeerConnection {
 export class P2PTransport extends EventEmitter {
   private config: P2PConfig;
   private logger: Logger;
-  private server: WebSocketServer | null = null;
+  private server: InstanceType<typeof WebSocketServer> | null = null;
   private peers: Map<string, PeerConnection> = new Map();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private signFn: ((msg: Buffer) => Promise<Buffer>) | null = null;

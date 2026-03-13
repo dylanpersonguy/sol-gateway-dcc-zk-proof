@@ -1,4 +1,4 @@
-# Canonical Encoding Specification v2.0
+# Canonical Encoding Specification v2.3
 
 ## SOL ⇄ DCC ZK Bridge — Cross-Language Message Encoding
 
@@ -421,7 +421,7 @@ minted_amount::<message_id_base58>  = amount      (IntegerEntry — audit trail)
 - [x] TypeScript encoder (`libs/encoding-ts`)
 - [x] RIDE encoder (`zk_bridge.ride::computeMessageId`)
 - [x] Circom circuit (1448-bit preimage → Keccak256)
-- [x] 32 test vectors with preimage, hash, leaf hash, ZK public inputs
+- [x] 44 test vectors with preimage, hash, leaf hash, ZK public inputs (v2.0)
 - [x] CI enforcement of cross-language equivalence
 - [x] RIDE `verifyAndMint` v2: Strategy A message_id recomputation
 - [x] RIDE `computeLeafHash`: domain-separated Merkle leaf
@@ -429,6 +429,9 @@ minted_amount::<message_id_base58>  = amount      (IntegerEntry — audit trail)
 - [x] RIDE anomaly auto-pause: triggers on 2x hourly cap
 - [x] RIDE checkpoint freshness: rejects checkpoints older than 7 days
 - [x] RIDE test harness: `tests/ride-equivalence.test.mjs`
+- [x] Solana `compute_message_id` uses u32 LE for event_index (aligned with spec v2.3)
+- [x] ENCODING_VERSION constant (= 1) in Solana on-chain code
+- [x] Overflow assertion: event_index > u32::MAX panics on-chain
 
 ---
 
@@ -441,3 +444,4 @@ minted_amount::<message_id_base58>  = amount      (IntegerEntry — audit trail)
 | 2.0 | 2025-01-20 | Full rewrite: byte layout diagrams, ZK public input packing, BN128 details, RIDE limitations, library API contract, 32 vectors with full expected values |
 | 2.1 | 2025-01-22 | Ride adaptation: Strategy A message_id recomputation, recipient=32-byte pubkey, @Verifier script, anomaly auto-pause, checkpoint freshness, enhanced storage schema, Ride complexity analysis, compensating controls |
 | 2.2 | 2025-01-24 | FV-1: Solana two-step resume flow with timelock. FV-4: max_deposit enforced at entrypoint (already present). GOAL-3: execute_scheduled_unlock instruction for delayed large withdrawals. Recipient field clarified as Curve25519 public key throughout. |
+| 2.3 | 2025-01-XX | **CRITICAL FIX (E-1):** Solana `compute_message_id` aligned to u32 LE (4 bytes) for event_index, matching all other implementations. Added ENCODING_VERSION constant. Added 10 boundary vectors (44 total). cancelPendingMint accounting fix (E-8). |

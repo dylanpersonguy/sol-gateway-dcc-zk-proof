@@ -175,6 +175,20 @@ transferRouter.get('/:id', async (req: Request, res: Response, next: NextFunctio
         }
       }
 
+      // Also check DUSD contract (USDC/USDT deposits routed to mintDusd)
+      if (status !== 'completed' && dccCfg.dusdContract) {
+        try {
+          const dusdProcessed = await isTransferProcessed(
+            dccCfg.dusdContract,
+            id,
+            dccCfg.nodeUrl,
+          );
+          if (dusdProcessed) status = 'completed';
+        } catch (err: any) {
+          logger.warn('Failed to query DUSD contract for transfer status', { transferId: id, error: err.message });
+        }
+      }
+
       // Update DB if status changed
       if (status === 'completed' && dbTransfer && dbTransfer.status !== 'completed') {
         try { updateTransferInDb(id, 'completed'); } catch {}
@@ -195,7 +209,7 @@ transferRouter.get('/:id', async (req: Request, res: Response, next: NextFunctio
       confirmations: dbTransfer?.confirmations || 0,
       requiredConfirmations: 32,
       validatorSignatures: dbTransfer?.validator_sigs || 0,
-      requiredSignatures: 3,
+      requiredSignatures: parseInt(process.env.MIN_VALIDATORS || '3'),
       createdAt: dbTransfer?.created_at ? dbTransfer.created_at * 1000 : Date.now(),
       updatedAt: dbTransfer?.updated_at ? dbTransfer.updated_at * 1000 : Date.now(),
       estimatedCompletion: null,

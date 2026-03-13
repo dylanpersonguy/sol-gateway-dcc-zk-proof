@@ -756,13 +756,32 @@ func executeResume() = {
 func cancelPendingMint(transferId: String) = {
     if (!isAdmin(i.caller) && !isGuardian(i.caller)) then throw("Unauthorized")
     else {
+        # FIX (E-8): Decrement tokenTotalMinted by the cancelled amount.
+        # tokenTotalMinted was pre-incremented at queue time (HIGH-5 fix),
+        # so cancelling without decrementing inflates outstanding supply.
+        let pendingAmount = match getInteger(this, "pending_amount_" + transferId) {
+            case a: Int => a
+            case _ => 0
+        }
+        let pendingSplMint = match getString(this, "pending_spl_mint_" + transferId) {
+            case s: String => s
+            case _ => ""
+        }
+        let decrementEntries = if (pendingAmount > 0 && pendingSplMint != "") then {
+            let tokenMinted = match getInteger(this, keyTokenTotalMinted(pendingSplMint)) {
+                case m: Int => m
+                case _ => 0
+            }
+            [IntegerEntry(keyTokenTotalMinted(pendingSplMint), tokenMinted - pendingAmount)]
+        } else []
+
         [
             DeleteEntry(keyPendingLargeTx(transferId)),
             DeleteEntry(keyPendingLargeTxHeight(transferId)),
             DeleteEntry("pending_recipient_" + transferId),
             DeleteEntry("pending_amount_" + transferId),
             DeleteEntry("pending_spl_mint_" + transferId)
-        ]
+        ] ++ decrementEntries
     }
 }
 
