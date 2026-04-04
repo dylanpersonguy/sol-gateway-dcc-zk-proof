@@ -1,25 +1,15 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useWallet } from '@solana/wallet-adapter-react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { usePhantom } from '../context/PhantomContext';
+import { useWalletConnection } from '../hooks/useWalletConnection';
 
-// Access the Phantom provider directly — bypasses wallet-adapter's broken connect flow
-function getPhantomProvider(): any | null {
-  if (typeof window === 'undefined') return null;
-  const w = window as any;
-  return w.phantom?.solana ?? w.solana ?? null;
-}
-
-function WalletButton() {
-  const { publicKey, connected, disconnect, select, wallets, connect, wallet } = useWallet();
-  const { setPhantomPubkey } = usePhantom();
+function ConnectedMenu({ displayAddr, onCopy, onDisconnect }: {
+  displayAddr: string;
+  onCopy: () => void;
+  onDisconnect: () => void;
+}) {
   const [showMenu, setShowMenu] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [directPubkey, setDirectPubkey] = useState<string | null>(null);
-  const [pendingConnect, setPendingConnect] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Close menu on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -30,117 +20,50 @@ function WalletButton() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // Sync directPubkey with wallet adapter context
-  useEffect(() => {
-    if (connected && publicKey) {
-      setDirectPubkey(publicKey.toBase58());
-      setPhantomPubkey(publicKey.toBase58());
-    }
-  }, [connected, publicKey]);
+  const short = displayAddr.slice(0, 4) + '...' + displayAddr.slice(-4);
 
-  // After select(), call connect() once the adapter is ready
-  useEffect(() => {
-    if (pendingConnect && wallet && !connected) {
-      connect().catch((err) => {
-        console.error('[wallet] adapter connect error:', err);
-      }).finally(() => setPendingConnect(false));
-    }
-  }, [pendingConnect, wallet, connected, connect]);
+  return (
+    <div className="relative" ref={menuRef}>
+      <button
+        onClick={() => setShowMenu(!showMenu)}
+        className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-xl h-10 flex items-center gap-2 text-sm font-medium transition-colors"
+      >
+        <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTIwIDRINEMyLjkgNCAyIDQuOSAyIDZ2MTJjMCAxLjEuOSAyIDIgMmgxNmMxLjEgMCAyLS45IDItMlY2YzAtMS4xLS45LTItMi0yem0wIDE0SDRWNmgxNnYxMnpNNCAxMGg0djRINHYtNHoiLz48L3N2Zz4=" alt="" className="w-5 h-5" />
+        {short}
+      </button>
+      {showMenu && (
+        <div className="absolute right-0 top-12 bg-gray-800 border border-gray-700 rounded-xl shadow-xl z-50 min-w-[160px] overflow-hidden">
+          <button
+            onClick={() => { onCopy(); setShowMenu(false); }}
+            className="w-full text-left px-4 py-2.5 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
+          >
+            Copy Address
+          </button>
+          <button
+            onClick={() => { onDisconnect(); setShowMenu(false); }}
+            className="w-full text-left px-4 py-2.5 text-sm text-red-400 hover:bg-gray-700 transition-colors"
+          >
+            Disconnect
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
-  const handleConnect = useCallback(async () => {
-    console.log('[wallet] handleConnect fired');
-    setShowMenu(false);
-    setBusy(true);
-    try {
-      const w = window as any;
-      console.log('[wallet] window.phantom =', w.phantom);
-      console.log('[wallet] window.solana =', w.solana);
-      const provider = w.phantom?.solana ?? w.solana ?? null;
-      console.log('[wallet] provider =', provider);
-      if (!provider) {
-        console.warn('[wallet] No Phantom provider found — opening phantom.app');
-        window.open('https://phantom.app/', '_blank');
-        setBusy(false);
-        return;
-      }
-      console.log('[wallet] Calling provider.connect()...');
-      const resp = await provider.connect();
-      console.log('[wallet] connect() resolved:', resp);
-      const addr = resp.publicKey.toString();
-      setDirectPubkey(addr);
-      setPhantomPubkey(addr);
-      console.log('[wallet] Connected! Address:', addr);
-      // Sync WalletProvider so useWallet().publicKey + signTransaction work everywhere
-      console.log('[wallet] available adapters:', wallets.map(w => w.adapter.name));
-      const phantomAdapter = wallets.find(
-        w => w.adapter.name === 'Phantom' || w.adapter.name.toLowerCase().includes('phantom')
-      );
-      if (phantomAdapter) {
-        console.log('[wallet] selecting adapter:', phantomAdapter.adapter.name);
-        select(phantomAdapter.adapter.name as any);
-        // Trigger connect() on next render when adapter is ready
-        setPendingConnect(true);
-      } else {
-        console.warn('[wallet] Phantom adapter not found in wallets list — using direct provider only');
-      }
-    } catch (err: any) {
-      console.error('[wallet] connect error:', err?.message ?? err);
-      alert('[wallet] connect error: ' + (err?.message ?? String(err)));
-    } finally {
-      setBusy(false);
-    }
-  }, [wallets, select]);
+function WalletButton() {
+  const { busy, isConnected, displayAddr, handleConnect, handleDisconnect } = useWalletConnection();
 
-  const handleDisconnect = useCallback(async () => {
-    setShowMenu(false);
-    try {
-      const provider = getPhantomProvider();
-      if (provider) await provider.disconnect();
-      setDirectPubkey(null);
-      setPhantomPubkey(null);
-      await disconnect();
-    } catch (err: any) {
-      console.error('[wallet] disconnect error:', err);
-    }
-  }, [disconnect]);
-
-  // Determine display address from either source
-  const displayAddr = publicKey?.toBase58() ?? directPubkey;
-  const isConnected = connected || !!directPubkey;
-
-  // Connected state — show address + dropdown
   if (isConnected && displayAddr) {
-    const short = displayAddr.slice(0, 4) + '...' + displayAddr.slice(-4);
     return (
-      <div className="relative" ref={menuRef}>
-        <button
-          onClick={() => setShowMenu(!showMenu)}
-          className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-xl h-10 flex items-center gap-2 text-sm font-medium transition-colors"
-        >
-          <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTIwIDRINEMyLjkgNCAyIDQuOSAyIDZ2MTJjMCAxLjEuOSAyIDIgMmgxNmMxLjEgMCAyLS45IDItMlY2YzAtMS4xLS45LTItMi0yem0wIDE0SDRWNmgxNnYxMnpNNCAxMGg0djRINHYtNHoiLz48L3N2Zz4=" alt="" className="w-5 h-5" />
-          {short}
-        </button>
-        {showMenu && (
-          <div className="absolute right-0 top-12 bg-gray-800 border border-gray-700 rounded-xl shadow-xl z-50 min-w-[160px] overflow-hidden">
-            <button
-              onClick={() => { navigator.clipboard.writeText(displayAddr); setShowMenu(false); }}
-              className="w-full text-left px-4 py-2.5 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
-            >
-              Copy Address
-            </button>
-            <button
-              onClick={handleDisconnect}
-              className="w-full text-left px-4 py-2.5 text-sm text-red-400 hover:bg-gray-700 transition-colors"
-            >
-              Disconnect
-            </button>
-          </div>
-        )}
-      </div>
+      <ConnectedMenu
+        displayAddr={displayAddr}
+        onCopy={() => navigator.clipboard.writeText(displayAddr)}
+        onDisconnect={handleDisconnect}
+      />
     );
   }
 
-  // Busy state
   if (busy) {
     return (
       <button
@@ -156,7 +79,6 @@ function WalletButton() {
     );
   }
 
-  // Default — single Connect Wallet button
   return (
     <button
       onClick={handleConnect}
