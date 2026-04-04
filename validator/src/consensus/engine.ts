@@ -215,10 +215,15 @@ export class ConsensusEngine extends EventEmitter {
     // Broadcast our attestation to peers
     this.emit('attestation_broadcast', localAttestation);
 
-    // Set consensus timeout
-    setTimeout(() => {
-      this.checkConsensusTimeout(transferId);
-    }, this.config.consensusTimeoutMs);
+    // Check consensus immediately in case we already meet the threshold (single-validator mode)
+    this.checkConsensus(transferId);
+
+    // Set consensus timeout for multi-validator scenarios
+    if (!pending.resolved) {
+      setTimeout(() => {
+        this.checkConsensusTimeout(transferId);
+      }, this.config.consensusTimeoutMs);
+    }
   }
 
   /**
@@ -408,6 +413,10 @@ export class ConsensusEngine extends EventEmitter {
 
     this.emit('consensus_failed', result);
     pending.resolved = true;
+    // Clean up so this transfer can be retried if needed
+    setTimeout(() => {
+      this.pendingConsensus.delete(transferId);
+    }, 5000);
   }
 
   /**

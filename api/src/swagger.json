@@ -1,0 +1,1491 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "SOL ⇄ DCC Bridge API",
+    "description": "REST API for the SOL-Gateway-DCC cross-chain bridge. Provides deposit/redeem instruction generation, transfer tracking, fee estimation, health monitoring, and admin operations.\n\n**Security Note:** This API never holds funds. All instructions are generated for client-side signing.\n\n### Rate Limits\n- **Global:** 100 requests / 15 minutes per IP\n- **Deposit/Redeem:** 10 requests / minute per IP\n- Internal (localhost/Docker) requests bypass rate limiting.",
+    "version": "1.0.0",
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    },
+    "contact": {
+      "name": "SOL-DCC Bridge Team"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000/api/v1",
+      "description": "Local development"
+    },
+    {
+      "url": "https://bridge-api.example.com/api/v1",
+      "description": "Production"
+    }
+  ],
+  "tags": [
+    { "name": "Deposit", "description": "Generate deposit instructions (SOL → DCC)" },
+    { "name": "Redeem", "description": "Generate burn/redeem instructions (DCC → SOL)" },
+    { "name": "Transfer", "description": "Track transfer status and history" },
+    { "name": "Fees", "description": "Fee schedule and quote calculator" },
+    { "name": "Health", "description": "Bridge health and connectivity checks" },
+    { "name": "Stats", "description": "Bridge statistics and on-chain metrics" },
+    { "name": "Admin", "description": "Protected admin dashboard endpoints (requires API key)" },
+    { "name": "CR Stable", "description": "CR Stable stablecoin minting and info (backed 1:1 by USDC/USDT)" },
+    { "name": "Decentral USD", "description": "DUSD stablecoin — deposit USDC/USDT to mint DUSD 1:1, redeem to unlock collateral" }
+  ],
+  "paths": {
+    "/deposit": {
+      "post": {
+        "tags": ["Deposit"],
+        "summary": "Generate native SOL deposit instruction",
+        "description": "Creates a Solana transaction instruction for depositing native SOL into the bridge vault. The instruction must be signed client-side by the sender wallet.",
+        "operationId": "createDeposit",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DepositRequest" },
+              "example": {
+                "sender": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+                "recipientDcc": "3P8eZWKG5BGQM7VuvCFtK6GbHFVR3z5DTb",
+                "amount": 1.5
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deposit instruction generated successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DepositResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "503": { "$ref": "#/components/responses/BridgePaused" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/deposit/limits": {
+      "get": {
+        "tags": ["Deposit"],
+        "summary": "Get current deposit limits",
+        "description": "Returns the current deposit limits, daily volume, and bridge operational status. Reads on-chain BridgeConfig account.",
+        "operationId": "getDepositLimits",
+        "responses": {
+          "200": {
+            "description": "Current deposit limits",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DepositLimits" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/deposit/spl": {
+      "post": {
+        "tags": ["Deposit"],
+        "summary": "Generate SPL token deposit instruction",
+        "description": "Creates a Solana transaction instruction for depositing an SPL token (e.g., USDC, USDT) into the bridge vault. The instruction must be signed client-side.",
+        "operationId": "createSplDeposit",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SplDepositRequest" },
+              "example": {
+                "sender": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+                "recipientDcc": "3P8eZWKG5BGQM7VuvCFtK6GbHFVR3z5DTb",
+                "amount": 100,
+                "splMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SPL deposit instruction generated",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SplDepositResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "503": { "$ref": "#/components/responses/BridgePaused" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/redeem": {
+      "post": {
+        "tags": ["Redeem"],
+        "summary": "Generate burn/redeem instruction",
+        "description": "Creates a DCC burn instruction. The user signs this on the DCC side to burn wSOL.DCC, which triggers validators to unlock SOL on Solana.",
+        "operationId": "createRedeem",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RedeemRequest" },
+              "example": {
+                "sender": "3P8eZWKG5BGQM7VuvCFtK6GbHFVR3z5DTb",
+                "solRecipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+                "amount": 1.0
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Redeem instruction generated",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RedeemResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "503": { "$ref": "#/components/responses/BridgePaused" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/redeem/limits": {
+      "get": {
+        "tags": ["Redeem"],
+        "summary": "Get current redeem limits",
+        "description": "Returns the current redeem limits, bridge pause state, and estimated unlock time.",
+        "operationId": "getRedeemLimits",
+        "responses": {
+          "200": {
+            "description": "Current redeem limits",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RedeemLimits" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transfer/register": {
+      "post": {
+        "tags": ["Transfer"],
+        "summary": "Register a new transfer",
+        "description": "Registers a new cross-chain transfer from the frontend. Records the transfer and returns a tracking ID.",
+        "operationId": "registerTransfer",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RegisterTransferRequest" },
+              "example": {
+                "transferId": "txn_abc123def456",
+                "sender": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+                "recipient": "3P8eZWKG5BGQM7VuvCFtK6GbHFVR3z5DTb",
+                "amount": 1500000000,
+                "direction": "sol_to_dcc",
+                "sourceTxHash": "5UfDuAPk..."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transfer registered",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RegisterTransferResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/transfer/notify-complete": {
+      "post": {
+        "tags": ["Transfer"],
+        "summary": "Notify transfer completion (internal)",
+        "description": "Internal endpoint used by validators to mark a transfer as completed. Broadcasts an SSE update to connected clients.",
+        "operationId": "notifyTransferComplete",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/NotifyCompleteRequest" },
+              "example": {
+                "transferId": "txn_abc123def456",
+                "status": "completed",
+                "destTxHash": "3P8eZW..."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transfer status updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "transferId": { "type": "string" },
+                    "status": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/transfer/{id}": {
+      "get": {
+        "tags": ["Transfer"],
+        "summary": "Get transfer status",
+        "description": "Returns detailed status for a specific transfer. Checks local DB, then DCC bridge-core on-chain, then ZK verifier.",
+        "operationId": "getTransferStatus",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Transfer ID",
+            "schema": { "type": "string", "minLength": 16 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transfer details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TransferDetails" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/transfer/history/{address}": {
+      "get": {
+        "tags": ["Transfer"],
+        "summary": "Get transfer history for an address",
+        "description": "Returns paginated transfer history for a specific wallet address (Solana or DCC).",
+        "operationId": "getTransferHistory",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "description": "Wallet address (Solana or DCC)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (1-indexed)",
+            "schema": { "type": "integer", "default": 1, "minimum": 1 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Results per page (max 100)",
+            "schema": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated transfer history",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TransferHistory" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/transfer/{id}/stream": {
+      "get": {
+        "tags": ["Transfer"],
+        "summary": "Real-time transfer updates (SSE)",
+        "description": "Server-Sent Events stream for real-time transfer status updates. The client connects and receives push updates as the transfer progresses through its lifecycle. A keepalive ping is sent every 30 seconds.",
+        "operationId": "streamTransferUpdates",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Transfer ID to subscribe to",
+            "schema": { "type": "string", "minLength": 16 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE event stream established",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-Sent Events stream. Each event is a JSON payload with `transferId`, `status`, and additional transfer fields.",
+                  "example": "data: {\"transferId\":\"txn_abc123\",\"status\":\"consensus_reached\"}\n\n"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/fees": {
+      "get": {
+        "tags": ["Fees"],
+        "summary": "Get fee schedule",
+        "description": "Returns the complete fee schedule for all bridge paths (committee fast-path and ZK proof path) in both directions.",
+        "operationId": "getFeeSchedule",
+        "responses": {
+          "200": {
+            "description": "Fee schedule",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FeeScheduleResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/fees/quote": {
+      "get": {
+        "tags": ["Fees"],
+        "summary": "Get fee quote",
+        "description": "Calculates a fee quote for a specific amount and direction. Automatically selects the committee or ZK path based on the amount threshold (100 SOL).",
+        "operationId": "getFeeQuote",
+        "parameters": [
+          {
+            "name": "amount",
+            "in": "query",
+            "required": true,
+            "description": "Amount in SOL",
+            "schema": { "type": "number", "minimum": 0 }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": true,
+            "description": "Transfer direction",
+            "schema": { "type": "string", "enum": ["deposit", "withdrawal"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fee quote",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FeeQuoteResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Bridge health status",
+        "description": "Performs real-time connectivity checks against both Solana and DCC chains, verifies contract deployment, and returns validator/bridge status. Returns 503 if any chain is unreachable.",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Bridge is healthy",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "Bridge degraded — one or more chains unreachable",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "tags": ["Stats"],
+        "summary": "Bridge statistics",
+        "description": "Returns on-chain bridge statistics including total minted/burned, vault balance, wSOL supply, collateralization ratio, and active validator count.",
+        "operationId": "getStats",
+        "responses": {
+          "200": {
+            "description": "Bridge statistics",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/StatsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/dashboard": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "Admin dashboard overview",
+        "description": "Returns a comprehensive overview for bridge operators including transfer stats, recent transfers, bridge state, and system metrics.",
+        "operationId": "getAdminDashboard",
+        "security": [{ "AdminApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Dashboard data",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AdminDashboardResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": {
+            "description": "Admin API not configured",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/transfers": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "List recent transfers",
+        "description": "Returns recent transfers with optional status filtering. Limited to 200 results.",
+        "operationId": "getAdminTransfers",
+        "security": [{ "AdminApiKey": [] }],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of transfers to return (max 200)",
+            "schema": { "type": "integer", "default": 50, "minimum": 1, "maximum": 200 }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by transfer status",
+            "schema": { "$ref": "#/components/schemas/TransferStatus" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transfer list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "count": { "type": "integer" },
+                    "transfers": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/TransferDetails" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/admin/transfer/{id}/status": {
+      "patch": {
+        "tags": ["Admin"],
+        "summary": "Manually update transfer status",
+        "description": "Allows operators to manually update a transfer's status for intervention scenarios. Broadcasts an SSE update to connected clients.",
+        "operationId": "updateTransferStatus",
+        "security": [{ "AdminApiKey": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Transfer ID",
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                  "status": { "$ref": "#/components/schemas/TransferStatus" },
+                  "error": { "type": "string", "description": "Error message (for failed status)" },
+                  "destTxHash": { "type": "string", "description": "Destination chain transaction hash" }
+                }
+              },
+              "example": {
+                "status": "completed",
+                "destTxHash": "5UfDuAPk..."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Status updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "transferId": { "type": "string" },
+                    "status": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/admin/stats": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "Admin transfer statistics",
+        "description": "Returns aggregated transfer statistics for the admin dashboard.",
+        "operationId": "getAdminStats",
+        "security": [{ "AdminApiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Transfer statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "totalTransfers": { "type": "integer" },
+                    "pendingTransfers": { "type": "integer" },
+                    "completedTransfers": { "type": "integer" },
+                    "failedTransfers": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/cr-stable/mint": {
+      "post": {
+        "tags": ["CR Stable"],
+        "summary": "Generate CR Stable mint instruction",
+        "description": "Creates a deposit instruction for minting CR Stable (CRS) tokens. Accepts USDC or USDT as the source token — SOL must be swapped to USDC/USDT client-side (via Jupiter) before calling this endpoint.\n\nReturns PDA addresses and fee breakdown for client-side transaction construction.",
+        "operationId": "mintCRStable",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CRStableMintRequest" },
+              "example": {
+                "sender": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+                "recipientDcc": "3P8eZWKG5BGQM7VuvCFtK6GbHFVR3z5DTb",
+                "amount": 100,
+                "splMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Mint instruction generated successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CRStableMintResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cr-stable/info": {
+      "get": {
+        "tags": ["CR Stable"],
+        "summary": "Get CR Stable token info",
+        "description": "Returns CR Stable token metadata, backing mechanism details, current reserve status, and fee schedule.",
+        "operationId": "getCRStableInfo",
+        "responses": {
+          "200": {
+            "description": "CR Stable token info",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CRStableInfoResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dusd/mint": {
+      "post": {
+        "tags": ["Decentral USD"],
+        "summary": "Generate DUSD mint instruction",
+        "description": "Creates a deposit instruction for minting Decentral USD (DUSD) tokens. Accepts USDC or USDT as the source token (1:1 backing). Returns PDA addresses and fee breakdown for client-side transaction construction.",
+        "operationId": "mintDUSD",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DUSDMintRequest" },
+              "example": {
+                "sender": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+                "recipientDcc": "3P8eZWKG5BGQM7VuvCFtK6GbHFVR3z5DTb",
+                "amount": 100,
+                "splMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Mint instruction generated successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DUSDMintResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dusd/redeem": {
+      "post": {
+        "tags": ["Decentral USD"],
+        "summary": "Generate DUSD redeem instruction",
+        "description": "Burns DUSD tokens and unlocks the underlying USDC or USDT collateral on Solana. Returns fee breakdown and output details.",
+        "operationId": "redeemDUSD",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DUSDRedeemRequest" },
+              "example": {
+                "sender": "3P8eZWKG5BGQM7VuvCFtK6GbHFVR3z5DTb",
+                "recipientSol": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+                "amount": 100,
+                "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Redeem instruction generated successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DUSDRedeemResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dusd/info": {
+      "get": {
+        "tags": ["Decentral USD"],
+        "summary": "Get Decentral USD token info",
+        "description": "Returns DUSD token metadata, backing mechanism details, current reserve status, and fee schedule.",
+        "operationId": "getDUSDInfo",
+        "responses": {
+          "200": {
+            "description": "DUSD token info",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DUSDInfoResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AdminApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Admin-Key",
+        "description": "Admin API key. Can also be passed as a Bearer token in the Authorization header."
+      }
+    },
+    "schemas": {
+      "DepositRequest": {
+        "type": "object",
+        "required": ["sender", "recipientDcc", "amount"],
+        "properties": {
+          "sender": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 44,
+            "description": "Solana wallet address (base58 public key)"
+          },
+          "recipientDcc": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 64,
+            "description": "DCC wallet address to receive wSOL.DCC"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 0.001,
+            "maximum": 1000,
+            "description": "Amount of SOL to deposit"
+          }
+        }
+      },
+      "DepositResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "instruction": {
+            "type": "object",
+            "description": "Serialized Solana instruction for client-side signing",
+            "properties": {
+              "programId": { "type": "string", "description": "Bridge program ID" },
+              "keys": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "pubkey": { "type": "string" },
+                    "isSigner": { "type": "boolean" },
+                    "isWritable": { "type": "boolean" }
+                  }
+                }
+              },
+              "data": { "type": "string", "description": "Base64-encoded instruction data" }
+            }
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "bridgeConfig": { "type": "string", "description": "BridgeConfig PDA address" },
+              "vault": { "type": "string", "description": "Vault PDA address" },
+              "userState": { "type": "string", "description": "UserState PDA address" },
+              "amountLamports": { "type": "integer", "description": "Amount in lamports" },
+              "currentSlot": { "type": "integer", "description": "Current Solana slot" }
+            }
+          }
+        }
+      },
+      "DepositLimits": {
+        "type": "object",
+        "properties": {
+          "minDeposit": { "type": "string", "example": "0.001", "description": "Minimum deposit in SOL" },
+          "maxDeposit": { "type": "string", "example": "1000", "description": "Maximum single deposit in SOL" },
+          "maxDailyVolume": { "type": "string", "example": "100000", "description": "Maximum daily bridge volume in SOL" },
+          "currentDailyVolume": { "type": "string", "description": "Current daily volume in SOL" },
+          "bridgeStatus": { "type": "string", "enum": ["active", "paused"], "description": "Bridge operational status" },
+          "estimatedMintTime": { "type": "string", "example": "3-10 minutes" },
+          "solanaConfirmations": { "type": "integer", "example": 32, "description": "Required Solana confirmations" }
+        }
+      },
+      "SplDepositRequest": {
+        "type": "object",
+        "required": ["sender", "recipientDcc", "amount", "splMint"],
+        "properties": {
+          "sender": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 44,
+            "description": "Solana wallet address"
+          },
+          "recipientDcc": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 64,
+            "description": "DCC wallet address"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 0.001,
+            "maximum": 1000000,
+            "description": "Amount in SPL token units"
+          },
+          "splMint": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 44,
+            "description": "SPL token mint address (e.g., USDC mint)"
+          }
+        }
+      },
+      "SplDepositResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "instruction": {
+            "type": "object",
+            "description": "Serialized Solana instruction for SPL token deposit"
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "splVault": { "type": "string", "description": "SPL token vault PDA" },
+              "senderAta": { "type": "string", "description": "Sender's associated token account" },
+              "tokenProgram": { "type": "string", "description": "Token program ID" },
+              "amountTokenUnits": { "type": "integer", "description": "Amount in smallest token units" }
+            }
+          }
+        }
+      },
+      "RedeemRequest": {
+        "type": "object",
+        "required": ["sender", "solRecipient", "amount"],
+        "properties": {
+          "sender": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 64,
+            "description": "DCC wallet address (sender of wSOL.DCC)"
+          },
+          "solRecipient": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 44,
+            "description": "Solana wallet address to receive unlocked SOL"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 0.001,
+            "maximum": 1000,
+            "description": "Amount in wSOL.DCC to burn"
+          }
+        }
+      },
+      "RedeemResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "instruction": {
+            "type": "object",
+            "description": "DCC burn instruction for client-side signing"
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "bridgeContract": { "type": "string", "description": "DCC bridge contract address" },
+              "wsolAssetId": { "type": "string", "description": "wSOL.DCC asset ID on DCC" },
+              "amountUnits": { "type": "integer", "description": "Amount in smallest units" },
+              "solRecipient": { "type": "string" },
+              "estimatedUnlockTime": { "type": "string", "example": "3-10 minutes" },
+              "estimatedFee": { "type": "string", "example": "0.005 DCC" }
+            }
+          }
+        }
+      },
+      "RedeemLimits": {
+        "type": "object",
+        "properties": {
+          "minRedeem": { "type": "string", "example": "0.001" },
+          "maxRedeem": { "type": "string", "example": "100" },
+          "maxDailyRedeem": { "type": "string", "example": "1000" },
+          "bridgeStatus": { "type": "string", "enum": ["active", "paused"] },
+          "estimatedUnlockTime": { "type": "string", "example": "3-10 minutes" },
+          "dccConfirmations": { "type": "integer", "example": 10 }
+        }
+      },
+      "RegisterTransferRequest": {
+        "type": "object",
+        "required": ["transferId", "sender", "recipient", "amount", "direction"],
+        "properties": {
+          "transferId": { "type": "string", "description": "Unique transfer identifier" },
+          "sender": { "type": "string", "description": "Sender wallet address" },
+          "recipient": { "type": "string", "description": "Recipient wallet address" },
+          "amount": { "type": "integer", "description": "Amount in smallest units (lamports or DCC units)" },
+          "amountFormatted": { "type": "string", "description": "Human-readable amount" },
+          "splMint": { "type": "string", "description": "SPL mint address (for SPL token transfers)" },
+          "sourceTxHash": { "type": "string", "description": "Source chain transaction hash" },
+          "direction": {
+            "type": "string",
+            "enum": ["sol_to_dcc", "dcc_to_sol"],
+            "description": "Transfer direction"
+          }
+        }
+      },
+      "RegisterTransferResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "transferId": { "type": "string" },
+          "status": { "type": "string", "example": "pending_confirmation" }
+        }
+      },
+      "NotifyCompleteRequest": {
+        "type": "object",
+        "required": ["transferId"],
+        "properties": {
+          "transferId": { "type": "string" },
+          "status": { "type": "string", "enum": ["completed", "failed"] },
+          "destTxHash": { "type": "string", "description": "Destination chain transaction hash" }
+        }
+      },
+      "TransferStatus": {
+        "type": "string",
+        "enum": [
+          "pending_confirmation",
+          "awaiting_consensus",
+          "consensus_reached",
+          "minting",
+          "completed",
+          "failed",
+          "expired",
+          "paused"
+        ],
+        "description": "Current stage in the transfer lifecycle"
+      },
+      "TransferDetails": {
+        "type": "object",
+        "properties": {
+          "transferId": { "type": "string" },
+          "sender": { "type": "string" },
+          "recipient": { "type": "string" },
+          "amount": { "type": "integer" },
+          "amountFormatted": { "type": "string" },
+          "direction": { "type": "string", "enum": ["sol_to_dcc", "dcc_to_sol"] },
+          "status": { "$ref": "#/components/schemas/TransferStatus" },
+          "sourceTxHash": { "type": "string" },
+          "destTxHash": { "type": "string" },
+          "splMint": { "type": "string", "nullable": true },
+          "error": { "type": "string", "nullable": true },
+          "createdAt": { "type": "integer", "description": "Unix timestamp (ms)" },
+          "updatedAt": { "type": "integer", "description": "Unix timestamp (ms)" },
+          "confirmations": { "type": "integer" },
+          "validatorSignatures": { "type": "integer" }
+        }
+      },
+      "TransferHistory": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "transfers": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/TransferDetails" }
+          },
+          "pagination": {
+            "type": "object",
+            "properties": {
+              "page": { "type": "integer" },
+              "limit": { "type": "integer" },
+              "total": { "type": "integer" },
+              "totalPages": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "FeeScheduleResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "fees": {
+            "type": "object",
+            "properties": {
+              "deposit": {
+                "type": "object",
+                "properties": {
+                  "committee": { "$ref": "#/components/schemas/FeeRate" },
+                  "zk": { "$ref": "#/components/schemas/FeeRate" }
+                }
+              },
+              "withdrawal": {
+                "type": "object",
+                "properties": {
+                  "committee": { "$ref": "#/components/schemas/FeeRate" },
+                  "zk": { "$ref": "#/components/schemas/FeeRate" }
+                }
+              },
+              "minFeeSol": { "type": "number", "example": 0.001, "description": "Minimum fee floor in SOL" },
+              "zkThresholdSol": { "type": "number", "example": 100, "description": "Amount threshold for ZK path" }
+            }
+          },
+          "description": {
+            "type": "object",
+            "description": "Human-readable descriptions of each fee category"
+          }
+        }
+      },
+      "FeeRate": {
+        "type": "object",
+        "properties": {
+          "rate": { "type": "number", "description": "Fee rate as decimal (0.001 = 0.1%)", "example": 0.001 },
+          "display": { "type": "string", "description": "Human-readable percentage", "example": "0.10%" }
+        }
+      },
+      "FeeQuoteResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "quote": {
+            "type": "object",
+            "properties": {
+              "inputAmount": { "type": "number", "description": "Requested amount" },
+              "feeAmount": { "type": "number", "description": "Fee deducted" },
+              "receiveAmount": { "type": "number", "description": "Amount after fee" },
+              "feeRate": { "type": "number", "description": "Applied fee rate" },
+              "feeDisplay": { "type": "string", "description": "Human-readable fee percentage" },
+              "path": { "type": "string", "enum": ["committee", "zk"], "description": "Bridge path used" },
+              "direction": { "type": "string", "enum": ["deposit", "withdrawal"] },
+              "minFeeApplied": { "type": "boolean", "description": "Whether the minimum fee floor was applied" }
+            }
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["ok", "degraded"] },
+          "version": { "type": "string", "example": "1.0.0" },
+          "solana": {
+            "type": "object",
+            "properties": {
+              "connected": { "type": "boolean" },
+              "latestSlot": { "type": "integer" },
+              "programDeployed": { "type": "boolean" }
+            }
+          },
+          "dcc": {
+            "type": "object",
+            "properties": {
+              "connected": { "type": "boolean" },
+              "latestHeight": { "type": "integer" },
+              "contractDeployed": { "type": "boolean" }
+            }
+          },
+          "validators": {
+            "type": "object",
+            "properties": {
+              "active": { "type": "integer", "description": "Number of active validators" },
+              "required": { "type": "integer", "description": "Minimum required validators" },
+              "healthy": { "type": "boolean" }
+            }
+          },
+          "bridge": {
+            "type": "object",
+            "properties": {
+              "paused": { "type": "boolean" },
+              "totalMinted": { "type": "string" },
+              "totalBurned": { "type": "string" },
+              "outstanding": { "type": "string" }
+            }
+          },
+          "timestamp": { "type": "integer", "description": "Unix timestamp (ms)" }
+        }
+      },
+      "StatsResponse": {
+        "type": "object",
+        "properties": {
+          "totalTransfers": { "type": ["string", "integer"], "description": "'live' or 0" },
+          "totalVolumeSol": { "type": "string", "description": "Total minted in SOL" },
+          "totalBurnedSol": { "type": "string", "description": "Total burned in SOL" },
+          "dailyMintedSol": { "type": "string", "description": "Today's minted volume in SOL" },
+          "activeValidators": { "type": "integer" },
+          "vaultBalance": { "type": "string", "description": "SOL vault balance" },
+          "wsolSupply": { "type": "string", "description": "Outstanding wSOL.DCC supply" },
+          "collateralizationRatio": { "type": "string", "description": "Vault / outstanding ratio", "example": "1.0000" },
+          "bridgePaused": { "type": "boolean" },
+          "timestamp": { "type": "integer" }
+        }
+      },
+      "AdminDashboardResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "timestamp": { "type": "integer" },
+          "transfers": {
+            "type": "object",
+            "description": "Aggregated transfer statistics"
+          },
+          "recentTransfers": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/TransferDetails" },
+            "description": "Last 20 transfers"
+          },
+          "bridge": {
+            "type": "object",
+            "properties": {
+              "paused": { "type": "boolean" },
+              "totalMinted": { "type": "string" },
+              "dccContract": { "type": "string" },
+              "solanaProgram": { "type": "string" }
+            }
+          },
+          "system": {
+            "type": "object",
+            "properties": {
+              "uptime": { "type": "number", "description": "Server uptime in seconds" },
+              "memoryUsage": { "type": "object", "description": "Node.js memory usage" },
+              "nodeVersion": { "type": "string" }
+            }
+          }
+        }
+      },
+      "CRStableMintRequest": {
+        "type": "object",
+        "required": ["sender", "recipientDcc", "amount", "splMint"],
+        "properties": {
+          "sender": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 44,
+            "description": "Solana wallet address (base58 public key)"
+          },
+          "recipientDcc": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 64,
+            "description": "DCC wallet address to receive CRS tokens"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 1,
+            "description": "Amount in USD value (e.g. 100 for $100 USDC)"
+          },
+          "splMint": {
+            "type": "string",
+            "enum": [
+              "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+              "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+            ],
+            "description": "SPL token mint address. Only USDC and USDT are accepted."
+          }
+        }
+      },
+      "CRStableMintResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "programId": { "type": "string", "description": "Bridge program ID" },
+              "bridgeConfig": { "type": "string", "description": "BridgeConfig PDA address" },
+              "vault": { "type": "string", "description": "Vault PDA address" },
+              "userState": { "type": "string", "description": "UserState PDA address" },
+              "amountLamports": { "type": "string", "description": "Amount in smallest token units (6 decimals)" },
+              "splMint": { "type": "string", "description": "Source SPL token mint address" }
+            }
+          },
+          "crStable": {
+            "type": "object",
+            "properties": {
+              "mintAmount": { "type": "string", "description": "CRS tokens to be minted (after fee)", "example": "99.900000" },
+              "feeAmount": { "type": "string", "description": "Fee deducted", "example": "0.100000" },
+              "feeRate": { "type": "number", "description": "Fee rate as decimal", "example": 0.001 },
+              "symbol": { "type": "string", "example": "CRS" }
+            }
+          }
+        }
+      },
+      "CRStableInfoResponse": {
+        "type": "object",
+        "properties": {
+          "symbol": { "type": "string", "example": "CRS" },
+          "name": { "type": "string", "example": "CR Stable" },
+          "fullName": { "type": "string", "example": "Stable CR Coin" },
+          "decimals": { "type": "integer", "example": 6 },
+          "description": { "type": "string" },
+          "backing": {
+            "type": "object",
+            "properties": {
+              "acceptedTokens": { "type": "array", "items": { "type": "string" }, "example": ["USDC", "USDT"] },
+              "mechanism": { "type": "string", "example": "1:1 collateralized" },
+              "vaultAddress": { "type": "string", "description": "Solana vault address holding reserves" }
+            }
+          },
+          "fees": {
+            "type": "object",
+            "properties": {
+              "mintFee": { "type": "string", "example": "0.10%" },
+              "redeemFee": { "type": "string", "example": "0.10%" },
+              "minimumMint": { "type": "number", "example": 1 }
+            }
+          }
+        }
+      },
+      "DUSDMintRequest": {
+        "type": "object",
+        "required": ["sender", "recipientDcc", "amount", "splMint"],
+        "properties": {
+          "sender": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 44,
+            "description": "Solana wallet address (base58 public key)"
+          },
+          "recipientDcc": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 64,
+            "description": "DCC wallet address to receive DUSD tokens"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 1,
+            "description": "Amount in USD value (e.g. 100 for $100 USDC)"
+          },
+          "splMint": {
+            "type": "string",
+            "enum": [
+              "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+              "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+            ],
+            "description": "SPL token mint address. Only USDC and USDT are accepted."
+          }
+        }
+      },
+      "DUSDMintResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "programId": { "type": "string", "description": "Bridge program ID" },
+              "bridgeConfig": { "type": "string", "description": "BridgeConfig PDA address" },
+              "vault": { "type": "string", "description": "Vault PDA address" },
+              "userState": { "type": "string", "description": "UserState PDA address" },
+              "amountLamports": { "type": "string", "description": "Amount in smallest token units (6 decimals)" },
+              "splMint": { "type": "string", "description": "Source SPL token mint address" }
+            }
+          },
+          "dusd": {
+            "type": "object",
+            "properties": {
+              "mintAmount": { "type": "string", "description": "DUSD tokens to be minted (after fee)", "example": "99.900000" },
+              "feeAmount": { "type": "string", "description": "Fee deducted", "example": "0.100000" },
+              "feeRate": { "type": "number", "description": "Fee rate as decimal", "example": 0.001 },
+              "symbol": { "type": "string", "example": "DUSD" }
+            }
+          }
+        }
+      },
+      "DUSDRedeemRequest": {
+        "type": "object",
+        "required": ["sender", "recipientSol", "amount", "outputMint"],
+        "properties": {
+          "sender": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 64,
+            "description": "DCC wallet address burning DUSD"
+          },
+          "recipientSol": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 44,
+            "description": "Solana wallet address to receive USDC/USDT"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 1,
+            "description": "Amount of DUSD to redeem"
+          },
+          "outputMint": {
+            "type": "string",
+            "enum": [
+              "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+              "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+            ],
+            "description": "Output SPL token mint. Choose USDC or USDT."
+          }
+        }
+      },
+      "DUSDRedeemResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": true },
+          "redeem": {
+            "type": "object",
+            "properties": {
+              "recipientSol": { "type": "string", "description": "Solana recipient address" },
+              "outputMint": { "type": "string", "description": "Output token mint address" },
+              "redeemAmount": { "type": "string", "description": "USDC/USDT to be unlocked (after fee)", "example": "99.900000" },
+              "feeAmount": { "type": "string", "description": "Fee deducted", "example": "0.100000" },
+              "feeRate": { "type": "number", "description": "Fee rate as decimal", "example": 0.001 },
+              "symbol": { "type": "string", "example": "DUSD" }
+            }
+          }
+        }
+      },
+      "DUSDInfoResponse": {
+        "type": "object",
+        "properties": {
+          "symbol": { "type": "string", "example": "DUSD" },
+          "name": { "type": "string", "example": "Decentral USD" },
+          "fullName": { "type": "string", "example": "Decentral USD Stablecoin" },
+          "decimals": { "type": "integer", "example": 6 },
+          "description": { "type": "string" },
+          "backing": {
+            "type": "object",
+            "properties": {
+              "acceptedTokens": { "type": "array", "items": { "type": "string" }, "example": ["USDC", "USDT"] },
+              "mechanism": { "type": "string", "example": "1:1 collateralized" },
+              "vaultAddress": { "type": "string", "description": "Solana vault address holding DUSD reserves" }
+            }
+          },
+          "fees": {
+            "type": "object",
+            "properties": {
+              "mintFee": { "type": "string", "example": "0.10%" },
+              "redeemFee": { "type": "string", "example": "0.10%" },
+              "minimumMint": { "type": "number", "example": 1 },
+              "minimumRedeem": { "type": "number", "example": 1 }
+            }
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string", "description": "Error message" },
+          "details": {
+            "type": "array",
+            "description": "Validation error details (Zod issues)",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": { "type": "string" },
+                "message": { "type": "string" },
+                "path": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid request parameters",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid admin API key",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "Unauthorized" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "Transfer not found" }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Rate limit exceeded",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "Too many requests — rate limit exceeded" }
+          }
+        }
+      },
+      "BridgePaused": {
+        "description": "Bridge is currently paused",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "Bridge is currently paused" }
+          }
+        }
+      }
+    }
+  }
+}

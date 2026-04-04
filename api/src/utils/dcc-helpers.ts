@@ -18,6 +18,7 @@ export function getDccConfig() {
   return {
     nodeUrl: process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io',
     bridgeContract: process.env.DCC_BRIDGE_CONTRACT || '',
+    dusdContract: process.env.DCC_DUSD_CONTRACT || '3DNgmqL8JGBFTWFL7bB92EdZT2wSA8yNFZW',
     zkVerifierContract: process.env.DCC_ZK_VERIFIER_CONTRACT || '',
     wsolAssetId: process.env.SOL_ASSET_ID || process.env.WSOL_ASSET_ID || '',
     chainIdChar: process.env.DCC_CHAIN_ID_CHAR || '?',

@@ -17,6 +17,8 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import path from 'path';
+import swaggerUi from 'swagger-ui-express';
+import swaggerDocument from './swagger.json';
 import { depositRouter } from './routes/deposit';
 import { transferRouter } from './routes/transfer';
 import { redeemRouter } from './routes/redeem';
@@ -24,6 +26,8 @@ import { healthRouter } from './routes/health';
 import { statsRouter } from './routes/stats';
 import { adminRouter } from './routes/admin';
 import { feeRouter } from './routes/fees';
+import { crStableRouter } from './routes/cr-stable';
+import { dusdRouter } from './routes/dusd';
 import { errorHandler } from './middleware/error-handler';
 import { requestLogger } from './middleware/request-logger';
 import { createLogger } from './utils/logger';
@@ -78,6 +82,10 @@ async function main(): Promise<void> {
   app.use(requestLogger);
 
   // ── Routes ──
+  app.use('/api/docs', swaggerUi.serve as any, swaggerUi.setup(swaggerDocument, {
+    customCss: '.swagger-ui .topbar { display: none }',
+    customSiteTitle: 'SOL ⇄ DCC Bridge API Docs',
+  }) as any);
   app.use('/api/v1/deposit', depositLimiter, depositRouter);
   app.use('/api/v1/transfer', transferRouter);
   app.use('/api/v1/redeem', depositLimiter, redeemRouter);
@@ -85,6 +93,8 @@ async function main(): Promise<void> {
   app.use('/api/v1/health', healthRouter);
   app.use('/api/v1/stats', statsRouter);
   app.use('/api/v1/admin', adminRouter);
+  app.use('/api/v1/cr-stable', depositLimiter, crStableRouter);
+  app.use('/api/v1/dusd', depositLimiter, dusdRouter);
 
   // ── Error Handling ──
   app.use(errorHandler);
@@ -93,6 +103,7 @@ async function main(): Promise<void> {
   app.listen(PORT, () => {
     logger.info(`Bridge API server running on port ${PORT}`);
     logger.info('Endpoints:');
+    logger.info(`  📚 /api/docs             — Swagger UI (interactive docs)`);
     logger.info(`  POST /api/v1/deposit     — Generate deposit instruction`);
     logger.info(`  POST /api/v1/deposit/spl — Generate SPL deposit instruction`);
     logger.info(`  GET  /api/v1/transfer/:id — Get transfer status`);
@@ -103,6 +114,11 @@ async function main(): Promise<void> {
     logger.info(`  GET  /api/v1/health       — Bridge health status`);
     logger.info(`  GET  /api/v1/stats        — Bridge statistics`);
     logger.info(`  GET  /api/v1/admin/*      — Admin dashboard (key required)`);
+    logger.info(`  POST /api/v1/cr-stable/mint — Mint CR Stable instruction`);
+    logger.info(`  GET  /api/v1/cr-stable/info — CR Stable token info`);
+    logger.info(`  POST /api/v1/dusd/mint     — Mint Decentral USD (DUSD)`);
+    logger.info(`  POST /api/v1/dusd/redeem   — Redeem DUSD for USDC/USDT`);
+    logger.info(`  GET  /api/v1/dusd/info     — Decentral USD token info`);
   });
 }
 

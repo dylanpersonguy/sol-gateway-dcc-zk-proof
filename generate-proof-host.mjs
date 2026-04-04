@@ -38,8 +38,8 @@ dotenv.config();
 // ═══════════════════════════════════════════════════════════════
 
 const DCC_NODE_URL = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
-const DCC_API_KEY  = process.env.DCC_API_KEY  || '***REDACTED_API_KEY***';
-const DCC_SEED     = process.env.DCC_VALIDATOR_SEED || '***REDACTED_SEED_PHRASE***';
+const DCC_API_KEY  = process.env.DCC_API_KEY  || (() => { throw new Error('Missing env var: DCC_API_KEY'); })();
+const DCC_SEED     = process.env.DCC_VALIDATOR_SEED || (() => { throw new Error('Missing env var: DCC_VALIDATOR_SEED'); })();
 const DCC_CHAIN_ID = process.env.DCC_CHAIN_ID_CHAR || String.fromCharCode(Number(process.env.DCC_CHAIN_ID) || 63);
 
 const ZK_VERIFIER   = '3DYPrVWcN9BWbQpo3tfCR3fvrHDcGczZ9c6';

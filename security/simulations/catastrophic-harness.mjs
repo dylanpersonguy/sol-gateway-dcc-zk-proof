@@ -438,6 +438,11 @@ class BridgeModel {
     if (caller !== this.dccAdmin && caller !== this.dccGuardian)
       return { ok: false, err: 'UNAUTHORIZED' };
     if (!this.pendingLarge.has(messageId)) return { ok: false, err: 'NOT_PENDING' };
+    // FIX (E-8): Decrement totalMinted by cancelled pending amount
+    const pending = this.pendingLarge.get(messageId);
+    if (pending && pending.amount) {
+      this.dccTotalMinted -= pending.amount;
+    }
     this.pendingLarge.delete(messageId);
     return { ok: true };
   }

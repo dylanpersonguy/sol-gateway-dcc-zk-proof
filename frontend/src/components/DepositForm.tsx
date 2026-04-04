@@ -3,23 +3,13 @@ import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { usePhantom } from '../context/PhantomContext';
 import { useBridgeStore } from '../hooks/useBridgeStore';
 import { bridgeApi } from '../services/api';
+import { buildNativeDepositTx, transferIdToHex } from '../hooks/useDepositTransaction';
 import { TokenSelector, TokenLogo } from './TokenSelector';
 import { calculateFee, formatFeeAmount, ZK_THRESHOLD_SOL } from '../config/fees';
 import toast from 'react-hot-toast';
-import {
-  PublicKey,
-  SystemProgram,
-  Transaction,
-  TransactionInstruction,
-} from '@solana/web3.js';
-import bs58 from 'bs58';
 
-const DEPOSIT_DISC = new Uint8Array([242, 35, 198, 137, 82, 225, 242, 182]);
-
-// Bridge constants
 const BRIDGE_PROGRAM_ID = '9yJDb6VyjDHmQC7DLADDdLFm9wxWanXRM5x9SdZ3oVkF';
 const VAULT_ADDRESS     = 'A2CMs9oPjSW46NvQDKFDqBqxj9EMvoJbTKkJJP9WK96U';
-const BRIDGE_CONFIG     = 'Fn4CxJ47wbTy4cuGZBf1a1p9ncAfWrjgjpqcdVR3eY1M';
 
 export function DepositForm() {
   const { publicKey: adapterPubkey, signTransaction: adapterSign } = useWallet();
@@ -83,77 +73,10 @@ export function DepositForm() {
         throw new Error('Failed to create deposit instruction');
       }
 
-      const { metadata } = response;
-      const programId = new PublicKey(metadata.programId);
-      const bridgeConfig = new PublicKey(metadata.bridgeConfig);
-      const vault = new PublicKey(metadata.vault);
-      const userState = new PublicKey(metadata.userState);
-      const amountLamports = BigInt(metadata.amountLamports);
-
-      // 2. Read user nonce from on-chain UserState
-      let nonce = 0n;
-      const usInfo = await connection.getAccountInfo(userState);
-      if (usInfo && usInfo.data.length >= 48) {
-        nonce = usInfo.data.readBigUInt64LE(40);
-      }
-
-      // 3. Compute transfer_id = SHA256(sender || nonce_le)
-      const tidBuf = new Uint8Array(40);
-      tidBuf.set(publicKey!.toBytes(), 0);
-      const nonceBytes = new ArrayBuffer(8);
-      new DataView(nonceBytes).setBigUint64(0, nonce, true);
-      tidBuf.set(new Uint8Array(nonceBytes), 32);
-
-      const hashBuffer = await crypto.subtle.digest('SHA-256', tidBuf);
-      const transferId = new Uint8Array(hashBuffer);
-
-      // 4. Derive deposit record PDA
-      const [depositRecord] = PublicKey.findProgramAddressSync(
-        [new TextEncoder().encode('deposit'), transferId],
-        programId,
+      // 2. Build, sign, and send the transaction
+      const { tx, transferId, blockhash, lastValidBlockHeight } = await buildNativeDepositTx(
+        connection, publicKey!, recipientDcc, response.metadata,
       );
-
-      // 5. Encode DCC recipient as 32 bytes
-      let recipientBytes: Uint8Array;
-      try {
-        const decoded = bs58.decode(recipientDcc);
-        recipientBytes = new Uint8Array(32);
-        recipientBytes.set(decoded.slice(0, 32), 0);
-      } catch {
-        // Fallback: UTF-8 encode
-        const enc = new TextEncoder().encode(recipientDcc);
-        recipientBytes = new Uint8Array(32);
-        recipientBytes.set(enc.slice(0, 32), 0);
-      }
-
-      // 6. Serialize instruction data: disc(8) + recipient(32) + amount(u64) + transfer_id(32)
-      const ixData = new Uint8Array(8 + 32 + 8 + 32);
-      ixData.set(DEPOSIT_DISC, 0);
-      ixData.set(recipientBytes, 8);
-      new DataView(ixData.buffer).setBigUint64(40, amountLamports, true);
-      ixData.set(transferId, 48);
-
-      // 7. Build the instruction (TransactionInstruction.data must be Buffer, not Uint8Array)
-      const ix = new TransactionInstruction({
-        programId,
-        keys: [
-          { pubkey: bridgeConfig,            isSigner: false, isWritable: true  },
-          { pubkey: userState,               isSigner: false, isWritable: true  },
-          { pubkey: depositRecord,           isSigner: false, isWritable: true  },
-          { pubkey: vault,                   isSigner: false, isWritable: true  },
-          { pubkey: publicKey!,              isSigner: true,  isWritable: true  },
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        ],
-        data: Buffer.from(ixData),
-      });
-
-      // 8. Build, sign, and send the transaction
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-      const tx = new Transaction({
-        recentBlockhash: blockhash,
-        feePayer: publicKey!,
-      });
-      tx.add(ix);
 
       console.log('[deposit] Requesting Phantom signature...');
       toast.success('Sign the transaction in your wallet');
@@ -168,10 +91,8 @@ export function DepositForm() {
       console.log('[deposit] Sent! Signature:', signature);
       toast.success(`Deposit sent! Tx: ${signature.slice(0, 16)}...`);
 
-      // 9. Set active transfer for the progress tracker
-      const transferIdHex = Array.from(transferId)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
+      // 3. Set active transfer for the progress tracker
+      const transferIdHex = transferIdToHex(transferId);
 
       setActiveTransfer({
         transferId: transferIdHex,
@@ -185,7 +106,7 @@ export function DepositForm() {
         useZk: amountNum >= 100,
       });
 
-      // 10. Register transfer with API so status polling works
+      // 4. Register transfer with API so status polling works
       bridgeApi.registerTransfer({
         transferId: transferIdHex,
         sender: publicKey!.toBase58(),
@@ -197,11 +118,11 @@ export function DepositForm() {
         direction: 'sol_to_dcc',
       }).catch(() => {}); // Non-critical
 
-      // 11. Wait for confirmation in background
+      // 5. Wait for confirmation in background
       connection.confirmTransaction(
         { signature, blockhash, lastValidBlockHeight },
         'confirmed',
-      ).then((confirmation) => {
+      ).then((confirmation: any) => {
         if (confirmation.value.err) {
           toast.error('Deposit transaction failed on-chain');
         } else {

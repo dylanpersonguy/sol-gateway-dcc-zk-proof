@@ -1,8 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { useBridgeStore } from '../hooks/useBridgeStore';
-import { bridgeApi } from '../services/api';
 import { getTokenByMint, DEFAULT_TOKEN } from '../config/tokens';
 import { TokenLogo } from './TokenSelector';
+import { useTransferPolling } from '../hooks/useTransferPolling';
 
 /* ── ZK Proof Sub-Steps Panel ── */
 
@@ -293,75 +292,9 @@ const STEPS_DCC_TO_SOL_COMMITTEE = [
   },
 ];
 
-/* ── Map any server status to our expanded step keys ── */
-function mapStatus(status: string): string {
-  const mapping: Record<string, string> = {
-    pending_confirmation: 'pending_confirmation',
-    awaiting_consensus: 'awaiting_consensus',
-    proving: 'zk_proving',
-    verifying: 'zk_verifying',
-    minting: 'minting',
-    completed: 'completed',
-    failed: 'failed',
-  };
-  return mapping[status] || status;
-}
-
 export function TransferProgress() {
-  const { activeTransfer, updateTransferStatus, clearActiveTransfer } = useBridgeStore();
-  const [elapsed, setElapsed] = useState(0);
+  const { activeTransfer, elapsed, mappedStatus, clearActiveTransfer } = useTransferPolling();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
-
-  // Timer
-  useEffect(() => {
-    if (!activeTransfer || activeTransfer.status === 'completed' || activeTransfer.status === 'failed') return;
-    const start = Date.now();
-    const interval = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
-    return () => clearInterval(interval);
-  }, [activeTransfer?.status]);
-
-  // Poll for status updates + SSE real-time push
-  useEffect(() => {
-    if (!activeTransfer || activeTransfer.status === 'completed' || activeTransfer.status === 'failed') return;
-
-    const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
-
-    // SSE for instant push updates from validator
-    let sse: EventSource | null = null;
-    try {
-      sse = new EventSource(`${API_BASE}/transfer/${activeTransfer.transferId}/stream`);
-      sse.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data);
-          const s = msg.status;
-          if (s && s !== activeTransfer.status) {
-            updateTransferStatus(mapStatus(s));
-          }
-        } catch {}
-      };
-      sse.onerror = () => { sse?.close(); sse = null; };
-    } catch {}
-
-    // Polling fallback (every 5s)
-    const fetchStatus = async () => {
-      try {
-        const data = await bridgeApi.getTransfer(activeTransfer.transferId);
-        const s = data?.transfer?.status ?? data?.status;
-        if (s && s !== activeTransfer.status) {
-          updateTransferStatus(mapStatus(s));
-        }
-      } catch { /* retry next tick */ }
-    };
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 5000);
-    const onVis = () => { if (!document.hidden) fetchStatus(); };
-    document.addEventListener('visibilitychange', onVis);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener('visibilitychange', onVis);
-      sse?.close();
-    };
-  }, [activeTransfer?.transferId]);
 
   if (!activeTransfer) return null;
 
@@ -371,10 +304,18 @@ export function TransferProgress() {
 
   const useZk = activeTransfer.useZk ?? parseFloat(activeTransfer.amount) >= ZK_THRESHOLD_SOL;
 
-  const steps = activeTransfer.direction === 'sol_to_dcc'
+  const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+  const isDusd = activeTransfer.splMint === USDC_MINT || activeTransfer.splMint === USDT_MINT;
+  const mintLabel = isDusd ? 'Minting DUSD' : `Minting ${token.wrappedSymbol}.DCC`;
+  const mintDesc = isDusd ? 'Issuing DUSD stablecoin 1:1 on DecentralChain' : 'Issuing wrapped tokens on DecentralChain';
+
+  const steps = (activeTransfer.direction === 'sol_to_dcc'
     ? (useZk ? STEPS_SOL_TO_DCC_ZK : STEPS_SOL_TO_DCC_COMMITTEE)
-    : (useZk ? STEPS_DCC_TO_SOL_ZK : STEPS_DCC_TO_SOL_COMMITTEE);
-  const mappedStatus = mapStatus(activeTransfer.status);
+    : (useZk ? STEPS_DCC_TO_SOL_ZK : STEPS_DCC_TO_SOL_COMMITTEE))
+    .map(s => s.key === 'minting' && activeTransfer.direction === 'sol_to_dcc'
+      ? { ...s, label: mintLabel, description: mintDesc }
+      : s);
   const currentStepIdx = Math.max(0, steps.findIndex((s) => s.key === mappedStatus));
   const isComplete = mappedStatus === 'completed';
   const isFailed = mappedStatus === 'failed';
@@ -461,85 +402,18 @@ export function TransferProgress() {
 
         {/* Steps */}
         <div className="space-y-1">
-          {steps.map((step, idx) => {
-            const isActive = idx === currentStepIdx && !isComplete && !isFailed;
-            const isDone = idx < currentStepIdx || isComplete;
-            const isZk = 'isZk' in step && step.isZk;
-            const isExpanded = expandedStep === idx;
-
-            return (
-              <div key={step.key}>
-                <button
-                  onClick={() => setExpandedStep(isExpanded ? null : idx)}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all ${
-                    isActive ? 'bg-purple-500/10 border border-purple-500/20' :
-                    isDone ? 'bg-green-500/5' :
-                    'hover:bg-gray-800/50'
-                  }`}
-                >
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0 transition-all ${
-                    isDone ? 'bg-green-500/20 text-green-400' :
-                    isActive ? (isZk ? 'gradient-zk text-white animate-pulse-glow' : 'bg-purple-600 text-white animate-pulse') :
-                    'bg-gray-800 text-gray-500'
-                  }`}>
-                    {isDone ? (
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                      </svg>
-                    ) : (
-                      <span className={isZk && isActive ? 'text-xs font-mono' : ''}>{step.icon}</span>
-                    )}
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className={`font-medium text-sm ${
-                        isDone ? 'text-green-400' : isActive ? 'text-white' : 'text-gray-500'
-                      }`}>
-                        {step.label}
-                      </span>
-                      {isZk && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full gradient-zk text-white font-medium">
-                          ZK
-                        </span>
-                      )}
-                      {isActive && (
-                        <span className="flex items-center gap-1 text-[10px] text-purple-400">
-                          <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
-                          In Progress
-                        </span>
-                      )}
-                    </div>
-                    <p className={`text-xs ${isDone ? 'text-green-600' : isActive ? 'text-gray-400' : 'text-gray-600'}`}>
-                      {step.description}
-                    </p>
-                  </div>
-
-                  {'avgTime' in step && step.avgTime && (
-                    <span className={`text-[10px] font-mono flex-shrink-0 ${
-                      isDone ? 'text-green-700' : isActive ? 'text-purple-400' : 'text-gray-600'
-                    }`}>
-                      {step.avgTime}
-                    </span>
-                  )}
-
-                  <svg className={`w-4 h-4 text-gray-600 transition-transform flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M6 9l6 6 6-6" />
-                  </svg>
-                </button>
-
-                {isExpanded && (
-                  <div className="ml-11 mr-3 mt-1 mb-2 p-3 bg-gray-800/50 rounded-lg border border-gray-700/50">
-                    {isZk ? (
-                      <ZkProofPanel isDone={isDone} />
-                    ) : (
-                      <p className="text-xs text-gray-400 leading-relaxed">{step.detail}</p>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {steps.map((step, idx) => (
+            <ProgressStep
+              key={step.key}
+              step={step}
+              idx={idx}
+              currentStepIdx={currentStepIdx}
+              isComplete={isComplete}
+              isFailed={isFailed}
+              expandedStep={expandedStep}
+              setExpandedStep={setExpandedStep}
+            />
+          ))}
         </div>
       </div>
 
@@ -608,6 +482,104 @@ export function TransferProgress() {
         >
           {isComplete ? 'Start New Transfer' : 'Try Again'}
         </button>
+      )}
+    </div>
+  );
+}
+
+/* ── Progress Step ── */
+
+function ProgressStep({
+  step,
+  idx,
+  currentStepIdx,
+  isComplete,
+  isFailed,
+  expandedStep,
+  setExpandedStep,
+}: {
+  step: any;
+  idx: number;
+  currentStepIdx: number;
+  isComplete: boolean;
+  isFailed: boolean;
+  expandedStep: number | null;
+  setExpandedStep: (v: number | null) => void;
+}) {
+  const isActive = idx === currentStepIdx && !isComplete && !isFailed;
+  const isDone = idx < currentStepIdx || isComplete;
+  const isZk = 'isZk' in step && step.isZk;
+  const isExpanded = expandedStep === idx;
+
+  return (
+    <div>
+      <button
+        onClick={() => setExpandedStep(isExpanded ? null : idx)}
+        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all ${
+          isActive ? 'bg-purple-500/10 border border-purple-500/20' :
+          isDone ? 'bg-green-500/5' :
+          'hover:bg-gray-800/50'
+        }`}
+      >
+        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0 transition-all ${
+          isDone ? 'bg-green-500/20 text-green-400' :
+          isActive ? (isZk ? 'gradient-zk text-white animate-pulse-glow' : 'bg-purple-600 text-white animate-pulse') :
+          'bg-gray-800 text-gray-500'
+        }`}>
+          {isDone ? (
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          ) : (
+            <span className={isZk && isActive ? 'text-xs font-mono' : ''}>{step.icon}</span>
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`font-medium text-sm ${
+              isDone ? 'text-green-400' : isActive ? 'text-white' : 'text-gray-500'
+            }`}>
+              {step.label}
+            </span>
+            {isZk && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full gradient-zk text-white font-medium">
+                ZK
+              </span>
+            )}
+            {isActive && (
+              <span className="flex items-center gap-1 text-[10px] text-purple-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
+                In Progress
+              </span>
+            )}
+          </div>
+          <p className={`text-xs ${isDone ? 'text-green-600' : isActive ? 'text-gray-400' : 'text-gray-600'}`}>
+            {step.description}
+          </p>
+        </div>
+
+        {'avgTime' in step && step.avgTime && (
+          <span className={`text-[10px] font-mono flex-shrink-0 ${
+            isDone ? 'text-green-700' : isActive ? 'text-purple-400' : 'text-gray-600'
+          }`}>
+            {step.avgTime}
+          </span>
+        )}
+
+        <svg className={`w-4 h-4 text-gray-600 transition-transform flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+
+      {isExpanded && (
+        <div className="ml-11 mr-3 mt-1 mb-2 p-3 bg-gray-800/50 rounded-lg border border-gray-700/50">
+          {isZk ? (
+            <ZkProofPanel isDone={isDone} />
+          ) : (
+            <p className="text-xs text-gray-400 leading-relaxed">{step.detail}</p>
+          )}
+        </div>
       )}
     </div>
   );

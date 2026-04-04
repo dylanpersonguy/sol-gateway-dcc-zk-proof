@@ -3,7 +3,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 import dotenv from 'dotenv';
-dotenv.config();
+import path from 'path';
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 export interface ValidatorConfig {
   // ── Node Identity ──
@@ -19,6 +20,8 @@ export interface ValidatorConfig {
   // ── DecentralChain Connection ──
   dccNodeUrl: string;
   dccBridgeContract: string;
+  /** DUSD stablecoin contract — receives mintDusd() calls for USDC/USDT deposits */
+  dccDusdContract: string;
   dccChainId: number;
   dccChainIdChar: string;   // '?' for mainnet (produces 3D... addresses)
   dccSeed: string;           // Validator's DCC seed phrase for signing mints
@@ -71,66 +74,14 @@ export interface ValidatorConfig {
   zkVkeyPath: string;
   zkCheckpointWindowMs: number;
   zkMaxEventsPerCheckpoint: number;
-}
 
-export function loadConfig(): ValidatorConfig {
-  return {
-    nodeId: requireEnv('VALIDATOR_NODE_ID'),
-    privateKeyPath: requireEnv('VALIDATOR_PRIVATE_KEY_PATH'),
-
-    solanaRpcUrl: requireEnv('SOLANA_RPC_URL'),
-    solanaWsUrl: process.env.SOLANA_WS_URL || '',
-    solanaProgramId: requireEnv('SOLANA_PROGRAM_ID'),
-    solanaVaultPda: requireEnv('SOLANA_VAULT_PDA'),
-
-    dccNodeUrl: requireEnv('DCC_NODE_URL'),
-    dccBridgeContract: requireEnv('DCC_BRIDGE_CONTRACT'),
-    dccChainId: parseInt(process.env.DCC_CHAIN_ID || '63'),
-    dccChainIdChar: process.env.DCC_CHAIN_ID_CHAR || '?',
-    dccSeed: requireEnv('DCC_VALIDATOR_SEED'),
-    wsolAssetId: process.env.SOL_ASSET_ID || process.env.WSOL_ASSET_ID || requireEnv('SOL_ASSET_ID'),
-
-    minValidators: parseInt(process.env.MIN_VALIDATORS || '3'),
-    consensusTimeoutMs: parseInt(process.env.CONSENSUS_TIMEOUT_MS || '30000'),
-    maxRetries: parseInt(process.env.MAX_RETRIES || '3'),
-
-    solanaRequiredConfirmations: parseInt(process.env.SOLANA_CONFIRMATIONS || '32'),
-    dccRequiredConfirmations: parseInt(process.env.DCC_CONFIRMATIONS || '10'),
-    reorgProtectionSlots: parseInt(process.env.REORG_PROTECTION_SLOTS || '50'),
-
-    maxDailyOutflowLamports: BigInt(process.env.MAX_DAILY_OUTFLOW || '1000000000000'),
-    maxSingleTxLamports: BigInt(process.env.MAX_SINGLE_TX || '100000000000'),
-    minDepositLamports: BigInt(process.env.MIN_DEPOSIT || '1000000'),
-
-    metricsPort: parseInt(process.env.METRICS_PORT || '9090'),
-    healthCheckPort: parseInt(process.env.HEALTH_CHECK_PORT || '8080'),
-
-    bootstrapPeers: (process.env.BOOTSTRAP_PEERS || '').split(',').filter(Boolean),
-    p2pPort: parseInt(process.env.P2P_PORT || '9000'),
-
-    dbPath: process.env.DB_PATH || './data/validator.db',
-    redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
-
-    hsmEnabled: process.env.HSM_ENABLED === 'true',
-    hsmSlot: parseInt(process.env.HSM_SLOT || '0'),
-    hsmPin: process.env.HSM_PIN || '',
-    keyRotationIntervalHours: parseInt(process.env.KEY_ROTATION_HOURS || '168'),
-
-    // Bridge Fees
-    depositFeeRateCommittee: parseFloat(process.env.DEPOSIT_FEE_RATE_COMMITTEE || '0.001'),
-    depositFeeRateZk: parseFloat(process.env.DEPOSIT_FEE_RATE_ZK || '0.0015'),
-    withdrawalFeeRateCommittee: parseFloat(process.env.WITHDRAWAL_FEE_RATE_COMMITTEE || '0.0025'),
-    withdrawalFeeRateZk: parseFloat(process.env.WITHDRAWAL_FEE_RATE_ZK || '0.005'),
-    minFeeLamports: BigInt(process.env.MIN_FEE_LAMPORTS || '1000000'), // 0.001 SOL
-
-    // ZK Bridge (Phase 2)
-    zkVerifierContract: process.env.DCC_ZK_VERIFIER_CONTRACT || '',
-    zkWasmPath: process.env.ZK_WASM_PATH || 'zk/circuits/build/bridge_deposit_js/bridge_deposit.wasm',
-    zkZkeyPath: process.env.ZK_ZKEY_PATH || 'zk/circuits/build/bridge_deposit_final.zkey',
-    zkVkeyPath: process.env.ZK_VKEY_PATH || 'zk/circuits/build/verification_key.json',
-    zkCheckpointWindowMs: parseInt(process.env.ZK_CHECKPOINT_WINDOW_MS || '60000'),
-    zkMaxEventsPerCheckpoint: parseInt(process.env.ZK_MAX_EVENTS_PER_CHECKPOINT || '100'),
-  };
+  // ── Beta Safety Caps ──
+  /** Threshold in lamports above which ZK proof is REQUIRED (committee alone rejected) */
+  zkOnlyThresholdLamports: bigint;
+  /** Kill switch: if true, ZK proof path is completely disabled */
+  disableZkPath: boolean;
+  /** If true, block startup unless all RELEASE_GUARD prerequisites are met */
+  fullProduction: boolean;
 }
 
 function requireEnv(key: string): string {
@@ -139,4 +90,123 @@ function requireEnv(key: string): string {
     throw new Error(`Missing required environment variable: ${key}`);
   }
   return value;
+}
+
+function envStr(key: string, fallback: string): string {
+  return process.env[key] || fallback;
+}
+
+function envInt(key: string, fallback: number): number {
+  return parseInt(process.env[key] || String(fallback));
+}
+
+function envFloat(key: string, fallback: number): number {
+  return parseFloat(process.env[key] || String(fallback));
+}
+
+function envBigInt(key: string, fallback: string): bigint {
+  return BigInt(process.env[key] || fallback);
+}
+
+function envBool(key: string): boolean {
+  return process.env[key] === 'true';
+}
+
+function parseSolanaConfig() {
+  return {
+    solanaRpcUrl: requireEnv('SOLANA_RPC_URL'),
+    solanaWsUrl: envStr('SOLANA_WS_URL', ''),
+    solanaProgramId: requireEnv('SOLANA_PROGRAM_ID'),
+    solanaVaultPda: requireEnv('SOLANA_VAULT_PDA'),
+    solanaRequiredConfirmations: envInt('SOLANA_CONFIRMATIONS', 32),
+  };
+}
+
+function parseDccConfig() {
+  return {
+    dccNodeUrl: requireEnv('DCC_NODE_URL'),
+    dccBridgeContract: requireEnv('DCC_BRIDGE_CONTRACT'),
+    dccDusdContract: envStr('DCC_DUSD_CONTRACT', '3DNgmqL8JGBFTWFL7bB92EdZT2wSA8yNFZW'),
+    dccChainId: envInt('DCC_CHAIN_ID', 63),
+    dccChainIdChar: envStr('DCC_CHAIN_ID_CHAR', '?'),
+    dccSeed: requireEnv('DCC_VALIDATOR_SEED'),
+    wsolAssetId: process.env.SOL_ASSET_ID || process.env.WSOL_ASSET_ID || requireEnv('SOL_ASSET_ID'),
+    dccRequiredConfirmations: envInt('DCC_CONFIRMATIONS', 10),
+  };
+}
+
+function parseConsensusConfig() {
+  return {
+    minValidators: envInt('MIN_VALIDATORS', 3),
+    consensusTimeoutMs: envInt('CONSENSUS_TIMEOUT_MS', 30000),
+    maxRetries: envInt('MAX_RETRIES', 3),
+    reorgProtectionSlots: envInt('REORG_PROTECTION_SLOTS', 50),
+  };
+}
+
+function parseRateLimits() {
+  return {
+    maxDailyOutflowLamports: envBigInt('MAX_DAILY_OUTFLOW', '1000000000000'),
+    maxSingleTxLamports: envBigInt('MAX_SINGLE_TX', '100000000000'),
+    minDepositLamports: envBigInt('MIN_DEPOSIT', '1000000'),
+  };
+}
+
+function parseFeeConfig() {
+  return {
+    depositFeeRateCommittee: envFloat('DEPOSIT_FEE_RATE_COMMITTEE', 0.001),
+    depositFeeRateZk: envFloat('DEPOSIT_FEE_RATE_ZK', 0.0015),
+    withdrawalFeeRateCommittee: envFloat('WITHDRAWAL_FEE_RATE_COMMITTEE', 0.0025),
+    withdrawalFeeRateZk: envFloat('WITHDRAWAL_FEE_RATE_ZK', 0.005),
+    minFeeLamports: envBigInt('MIN_FEE_LAMPORTS', '1000000'),
+  };
+}
+
+function parseZkConfig() {
+  return {
+    zkVerifierContract: envStr('DCC_ZK_VERIFIER_CONTRACT', ''),
+    zkWasmPath: envStr('ZK_WASM_PATH', 'zk/circuits/build/bridge_deposit_js/bridge_deposit.wasm'),
+    zkZkeyPath: envStr('ZK_ZKEY_PATH', 'zk/circuits/build/bridge_deposit_final.zkey'),
+    zkVkeyPath: envStr('ZK_VKEY_PATH', 'zk/circuits/build/verification_key.json'),
+    zkCheckpointWindowMs: envInt('ZK_CHECKPOINT_WINDOW_MS', 60000),
+    zkMaxEventsPerCheckpoint: envInt('ZK_MAX_EVENTS_PER_CHECKPOINT', 100),
+    zkOnlyThresholdLamports: envBigInt('ZK_ONLY_THRESHOLD_LAMPORTS', '0'),
+    disableZkPath: envBool('DISABLE_ZK_PATH'),
+    fullProduction: envBool('FULL_PRODUCTION'),
+  };
+}
+
+function parseInfraConfig() {
+  return {
+    metricsPort: envInt('METRICS_PORT', 9090),
+    healthCheckPort: envInt('HEALTH_CHECK_PORT', 8080),
+    bootstrapPeers: (process.env.BOOTSTRAP_PEERS || '').split(',').filter(Boolean),
+    p2pPort: envInt('P2P_PORT', 9000),
+    dbPath: envStr('DB_PATH', './data/validator.db'),
+    redisUrl: envStr('REDIS_URL', 'redis://localhost:6379'),
+  };
+}
+
+function parseSecurityConfig() {
+  return {
+    hsmEnabled: envBool('HSM_ENABLED'),
+    hsmSlot: envInt('HSM_SLOT', 0),
+    hsmPin: envStr('HSM_PIN', ''),
+    keyRotationIntervalHours: envInt('KEY_ROTATION_HOURS', 168),
+  };
+}
+
+export function loadConfig(): ValidatorConfig {
+  return {
+    nodeId: requireEnv('VALIDATOR_NODE_ID'),
+    privateKeyPath: requireEnv('VALIDATOR_PRIVATE_KEY_PATH'),
+    ...parseSolanaConfig(),
+    ...parseDccConfig(),
+    ...parseConsensusConfig(),
+    ...parseRateLimits(),
+    ...parseFeeConfig(),
+    ...parseZkConfig(),
+    ...parseInfraConfig(),
+    ...parseSecurityConfig(),
+  };
 }

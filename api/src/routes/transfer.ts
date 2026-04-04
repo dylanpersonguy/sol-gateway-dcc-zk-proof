@@ -53,6 +53,44 @@ export interface TransferDetails {
 }
 
 /**
+ * Resolve transfer completion status by checking multiple on-chain contracts.
+ */
+async function resolveOnChainStatus(
+  transferId: string,
+  currentStatus: TransferStatus,
+  dccCfg: ReturnType<typeof getDccConfig>,
+): Promise<TransferStatus> {
+  const checks: Array<{ contract: string | undefined; checker: (contract: string) => Promise<boolean>; label: string }> = [
+    {
+      contract: dccCfg.bridgeContract,
+      checker: async (c) => (await isTransferProcessed(c, transferId, dccCfg.nodeUrl)) || !!(await getBurnRecord(c, transferId, dccCfg.nodeUrl)),
+      label: 'bridge core',
+    },
+    {
+      contract: dccCfg.zkVerifierContract,
+      checker: async (c) => isZkProcessed(c, transferId, dccCfg.nodeUrl),
+      label: 'ZK verifier',
+    },
+    {
+      contract: dccCfg.dusdContract,
+      checker: async (c) => isTransferProcessed(c, transferId, dccCfg.nodeUrl),
+      label: 'DUSD',
+    },
+  ];
+
+  for (const { contract, checker, label } of checks) {
+    if (!contract) continue;
+    try {
+      if (await checker(contract)) return 'completed';
+    } catch (err: any) {
+      logger.warn(`Failed to query DCC ${label} for transfer status`, { transferId, error: err.message });
+    }
+  }
+
+  return currentStatus;
+}
+
+/**
  * POST /api/v1/transfer/register
  *
  * Register a new transfer the frontend just submitted on Solana.
@@ -143,39 +181,10 @@ transferRouter.get('/:id', async (req: Request, res: Response, next: NextFunctio
     let status: TransferStatus = dbTransfer?.status || 'pending_confirmation';
     let destinationTxHash: string | null = dbTransfer?.dest_tx_hash || null;
 
-    // If not yet completed, check on-chain state
+    // If not yet completed, resolve from on-chain sources
     if (status !== 'completed') {
-      try {
-        if (dccCfg.bridgeContract) {
-          const processed = await isTransferProcessed(
-            dccCfg.bridgeContract,
-            id,
-            dccCfg.nodeUrl,
-          );
-          if (processed) status = 'completed';
+      status = await resolveOnChainStatus(id, status, dccCfg);
 
-          const burnRecord = await getBurnRecord(dccCfg.bridgeContract, id, dccCfg.nodeUrl);
-          if (burnRecord) status = 'completed';
-        }
-      } catch (err: any) {
-        logger.warn('Failed to query DCC bridge core for transfer status', { transferId: id, error: err.message });
-      }
-
-      // Also check ZK verifier contract (ZK-processed deposits)
-      if (status !== 'completed' && dccCfg.zkVerifierContract) {
-        try {
-          const zkDone = await isZkProcessed(
-            dccCfg.zkVerifierContract,
-            id,
-            dccCfg.nodeUrl,
-          );
-          if (zkDone) status = 'completed';
-        } catch (err: any) {
-          logger.warn('Failed to query DCC ZK verifier for transfer status', { transferId: id, error: err.message });
-        }
-      }
-
-      // Update DB if status changed
       if (status === 'completed' && dbTransfer && dbTransfer.status !== 'completed') {
         try { updateTransferInDb(id, 'completed'); } catch {}
       }
@@ -195,7 +204,7 @@ transferRouter.get('/:id', async (req: Request, res: Response, next: NextFunctio
       confirmations: dbTransfer?.confirmations || 0,
       requiredConfirmations: 32,
       validatorSignatures: dbTransfer?.validator_sigs || 0,
-      requiredSignatures: 3,
+      requiredSignatures: parseInt(process.env.MIN_VALIDATORS || '3'),
       createdAt: dbTransfer?.created_at ? dbTransfer.created_at * 1000 : Date.now(),
       updatedAt: dbTransfer?.updated_at ? dbTransfer.updated_at * 1000 : Date.now(),
       estimatedCompletion: null,
