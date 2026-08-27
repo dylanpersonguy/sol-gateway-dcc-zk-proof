@@ -19,16 +19,13 @@ import {
   computeMessageId,
   computeLeaf,
   computeEmptyLeaf,
-  hashPair,
-  hexToBytes,
   bytesToHex,
   MessageFields,
   DOMAIN_SEP,
   SOL_CHAIN_ID,
   DCC_CHAIN_ID,
 } from '../../zk/prover/src/message.js';
-import { MerkleTree, MerkleProof } from '../../zk/prover/src/merkle.js';
-import { ADVERSARIAL_VECTORS } from '../vectors/test-vectors.js';
+import { MerkleTree } from '../../zk/prover/src/merkle.js';
 
 /** Helper: create a standard deposit message */
 function mkDeposit(overrides: Partial<MessageFields> = {}): MessageFields {
@@ -108,7 +105,7 @@ describe('Adversarial: Wrong Chain ID', () => {
   it('forged chain ID leaf should not be in legitimate tree', () => {
     const legDep = mkDeposit();
     const { tree } = buildTree([legDep]);
-    const root = tree.getRoot();
+    const _root = tree.getRoot();
 
     const forgedDep = mkDeposit({ srcChainId: 99 });
     const forgedMsgId = computeMessageId(forgedDep);
@@ -304,7 +301,7 @@ describe('Adversarial: Cross-Chain Message Forgery', () => {
   it('domain separator prevents length-extension attacks', () => {
     // Changing domain separator changes the hash
     const dep = mkDeposit();
-    const legId = computeMessageId(dep);
+    const _legId = computeMessageId(dep);
 
     // SHA3/Keccak is resistant to length extension, but domain sep adds extra protection
     // We verify the domain separator is part of the preimage

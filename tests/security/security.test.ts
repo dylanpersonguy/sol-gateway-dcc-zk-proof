@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { Keypair, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import nacl from "tweetnacl";
 import { createHash } from "crypto";
 
@@ -163,9 +163,17 @@ describe("security tests", () => {
       const sig1 = signMessage(message, validator.secretKey);
       const sig2 = signMessage(message, validator.secretKey);
 
+      // The attack this guards (RIDE CRIT-5, and the consensus dedup keyed on
+      // the signing key) is two INDIVIDUALLY VALID signatures from ONE signer
+      // being counted toward an M-of-N threshold. Assert both halves: each
+      // signature really does verify, and the distinct-signer count is still 1.
+      expect(nacl.sign.detached.verify(message, sig1, validator.publicKey)).to.be.true;
+      expect(nacl.sign.detached.verify(message, sig2, validator.publicKey)).to.be.true;
+
       const pubkeys = [validator.publicKey, validator.publicKey];
       const uniquePubkeys = new Set(pubkeys.map((pk) => Buffer.from(pk).toString("hex")));
-      expect(uniquePubkeys.size).to.equal(1); // duplicate!
+      expect(pubkeys.length).to.equal(2);      // two valid signatures presented
+      expect(uniquePubkeys.size).to.equal(1);  // but only one real signer
       expect(uniquePubkeys.size).to.be.lessThan(pubkeys.length);
     });
   });

@@ -6,12 +6,34 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { Connection, PublicKey, SystemProgram } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import bs58 from 'bs58';
 import { createLogger } from '../utils/logger';
+import { readBridgeConfig, lamportsToSol } from '../utils/bridge-config';
 import { isValidDccAddress, getDccConfig, getBridgeStats } from '../utils/dcc-helpers';
 
 const logger = createLogger('DepositRoute');
 
 export const depositRouter = Router();
+
+/**
+ * Encode a DCC address into the 32-byte `recipient_dcc` field the on-chain
+ * program stores.
+ *
+ * A DCC address is base58 of 26 raw bytes, which renders as 35 characters.
+ * The canonical encoding — matching the frontend and what the validator
+ * decodes in validator/src/main.ts — is the base58-DECODED bytes, zero-padded
+ * to 32. Copying the ASCII characters instead silently drops the last 3,
+ * including the address checksum, producing an unrecoverable recipient.
+ */
+function encodeRecipientDcc(recipientDcc: string): Buffer {
+  const recipientBytes = Buffer.alloc(32);
+  const decoded = Buffer.from(bs58.decode(recipientDcc));
+  if (decoded.length > 32) {
+    throw new Error(`DCC address decodes to ${decoded.length} bytes, max 32`);
+  }
+  decoded.copy(recipientBytes, 0);
+  return recipientBytes;
+}
 
 // Input validation schema
 const DepositRequestSchema = z.object({
@@ -95,10 +117,8 @@ depositRouter.post('/', async (req: Request, res: Response, next: NextFunction) 
       programId,
     );
 
-    // Encode recipient DCC address as 32-byte array
-    const recipientBytes = Buffer.alloc(32);
-    const recipientBuf = Buffer.from(recipientDcc);
-    recipientBuf.copy(recipientBytes, 0, 0, Math.min(recipientBuf.length, 32));
+    // Encode recipient DCC address as 32-byte array (base58-decoded, zero-padded)
+    const recipientBytes = encodeRecipientDcc(recipientDcc);
 
     // Get current slot for transfer ID computation
     const slot = await connection.getSlot();
@@ -149,51 +169,31 @@ depositRouter.post('/', async (req: Request, res: Response, next: NextFunction) 
  */
 depositRouter.get('/limits', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    // Read limits from on-chain BridgeConfig account
-    const programId = process.env.SOLANA_PROGRAM_ID;
-    const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
-
+    // Read limits from the on-chain BridgeConfig account
     let minDeposit = '0.001';
     let maxDeposit = '100';
+    let maxDailyVolume = '1000';
+    let currentDailyVolume = '0';
     let bridgeStatus = 'active';
 
-    if (programId) {
-      try {
-        const connection = new Connection(rpcUrl);
-        const pid = new PublicKey(programId);
-        const [bridgeConfigPda] = PublicKey.findProgramAddressSync(
-          [Buffer.from('bridge_config')],
-          pid,
-        );
-        const accountInfo = await connection.getAccountInfo(bridgeConfigPda);
-        if (accountInfo?.data) {
-          // BridgeConfig layout: 8 (discriminator) + fields
-          // We read min_deposit and max_deposit as u64 at known offsets
-          // Authority(32) + dcc_contract(32) + threshold(1) + validator_count(1) + paused(1) + nonce(8) + min_deposit(8) + max_deposit(8)
-          const data = accountInfo.data;
-          const OFFSET_PAUSED = 8 + 32 + 32 + 1 + 1; // discriminator + authority + dcc_contract + threshold + validator_count
-          const OFFSET_MIN = OFFSET_PAUSED + 1 + 8; // paused + nonce
-          const OFFSET_MAX = OFFSET_MIN + 8;
-
-          if (data.length >= OFFSET_MAX + 8) {
-            const paused = data[OFFSET_PAUSED] !== 0;
-            const minLamports = data.readBigUInt64LE(OFFSET_MIN);
-            const maxLamports = data.readBigUInt64LE(OFFSET_MAX);
-            minDeposit = (Number(minLamports) / 1e9).toString();
-            maxDeposit = (Number(maxLamports) / 1e9).toString();
-            if (paused) bridgeStatus = 'paused';
-          }
-        }
-      } catch (e: any) {
-        logger.warn('Could not read on-chain limits, using defaults', { error: e.message });
+    try {
+      const cfg = await readBridgeConfig();
+      if (cfg) {
+        minDeposit = lamportsToSol(cfg.minDeposit);
+        maxDeposit = lamportsToSol(cfg.maxDeposit);
+        maxDailyVolume = lamportsToSol(cfg.maxDailyOutflow);
+        currentDailyVolume = lamportsToSol(cfg.currentDailyOutflow);
+        if (cfg.paused) bridgeStatus = 'paused';
       }
+    } catch (e: any) {
+      logger.warn('Could not read on-chain limits, using defaults', { error: e.message });
     }
 
     res.json({
       minDeposit,
       maxDeposit,
-      maxDailyVolume: '1000',
-      currentDailyVolume: '0',
+      maxDailyVolume,
+      currentDailyVolume,
       bridgeStatus,
       estimatedMintTime: '2-5 minutes',
       solanaConfirmations: 32,
@@ -266,9 +266,7 @@ depositRouter.post('/spl', async (req: Request, res: Response, next: NextFunctio
 
     const senderAta = getAssociatedTokenAddressSync(mintPubkey, senderPubkey);
 
-    const recipientBytes = Buffer.alloc(32);
-    const recipientBuf = Buffer.from(recipientDcc);
-    recipientBuf.copy(recipientBytes, 0, 0, Math.min(recipientBuf.length, 32));
+    const recipientBytes = encodeRecipientDcc(recipientDcc);
 
     const depositInstruction = {
       programId: programId.toString(),

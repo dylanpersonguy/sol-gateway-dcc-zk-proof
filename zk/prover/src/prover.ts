@@ -15,14 +15,12 @@
 
 import * as snarkjs from 'snarkjs';
 import * as fs from 'fs';
-import * as path from 'path';
 import {
   MessageFields,
   computeMessageId,
   bytesToBitsLE,
   numberToBitsLE,
   bytesToHex,
-  hexToBytes,
   hashToFieldElements,
   DOMAIN_SEP,
   MERKLE_TREE_DEPTH,

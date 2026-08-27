@@ -9,7 +9,7 @@
 // - Submit verified events to consensus layer
 // - Detect reorgs and invalidate affected events
 
-import { Connection, PublicKey, Commitment, Context, LogsFilter } from '@solana/web3.js';
+import { Connection, PublicKey, Commitment, Context } from '@solana/web3.js';
 import { EventEmitter } from 'events';
 import { Logger } from 'winston';
 import { createLogger } from '../utils/logger';
@@ -172,6 +172,7 @@ export class SolanaWatcher extends EventEmitter {
       );
       if (recent.length > 0) {
         this.lastSeenSignature = recent[0].signature;
+        this.lastProcessedSlot = recent[0].slot;
         this.logger.info('Polling seeded from latest signature', {
           signature: this.lastSeenSignature.slice(0, 16) + '...',
           slot: recent[0].slot,
@@ -463,6 +464,9 @@ export class SolanaWatcher extends EventEmitter {
     while (this.isRunning) {
       try {
         const currentSlot = await this.connection.getSlot('finalized');
+        // Surfaced by getHealth() — a slot that stops advancing is how an
+        // operator sees this watcher has stalled.
+        this.lastProcessedSlot = currentSlot;
 
         for (const [transferId, event] of this.pendingEvents) {
           const confirmations = currentSlot - event.slot;

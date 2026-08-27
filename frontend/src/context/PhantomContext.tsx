@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
-import { PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js';
+import { PublicKey, Transaction } from '@solana/web3.js';
 
 type SignTxFn = ((tx: Transaction) => Promise<Transaction>) | null;
 

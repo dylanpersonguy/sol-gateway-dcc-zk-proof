@@ -38,7 +38,7 @@ function parseArgs(): Args {
   };
 }
 
-async function compileRideScript(
+async function _compileRideScript(
   nodeUrl: string,
   script: string
 ): Promise<string> {

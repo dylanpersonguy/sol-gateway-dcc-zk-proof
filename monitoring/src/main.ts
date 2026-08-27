@@ -7,6 +7,7 @@
 // compromised, the monitor can detect anomalies and trigger pause.
 
 import dotenv from 'dotenv';
+import path from 'path';
 import express from 'express';
 import winston from 'winston';
 import cron from 'node-cron';
@@ -15,7 +16,12 @@ import axios from 'axios';
 import { AnomalyDetector, AnomalyAlert } from './detectors/anomaly-detector';
 import { AlertDispatcher } from './alerts/dispatcher';
 
-dotenv.config();
+// Load .env from the workspace root (parent of monitoring/).
+// A bare dotenv.config() resolves against cwd, so running from monitoring/
+// silently loaded nothing and every value fell through to its default —
+// localhost:8899 and the System Program instead of the bridge on mainnet.
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config(); // also pick up monitoring/.env if present
 
 const logger = winston.createLogger({
   level: 'info',
@@ -54,7 +60,7 @@ async function main(): Promise<void> {
       maxValidatorFaultRate: 0.1,
       minActiveValidators: parseInt(process.env.MIN_ACTIVE_VALIDATORS || '3'),
       maxBlockLatency: 30, // seconds
-      maxChainDesyncBlocks: 100,
+      minChainProgressRatio: 0.5,
     },
     logger
   );
@@ -146,6 +152,29 @@ async function main(): Promise<void> {
       alerts: detector.getRecentAlerts(100),
       counts: detector.getAlertCounts(),
     });
+  });
+
+  // Prometheus scrape endpoint — infra/prometheus.yml scrapes the `monitor` job
+  // at this port, so this must exist or the target reports down.
+  app.get('/metrics', (_req, res) => {
+    const counts = detector.getAlertCounts();
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+
+    let metrics = '';
+    metrics += '# HELP bridge_monitor_up Monitor process is running\n';
+    metrics += '# TYPE bridge_monitor_up gauge\n';
+    metrics += 'bridge_monitor_up 1\n';
+    metrics += '# HELP bridge_monitor_alerts_total Anomaly alerts raised, by category\n';
+    metrics += '# TYPE bridge_monitor_alerts_total counter\n';
+    for (const [category, count] of Object.entries(counts)) {
+      metrics += `bridge_monitor_alerts_total{category="${category}"} ${count}\n`;
+    }
+    metrics += '# HELP bridge_monitor_alerts_all Total anomaly alerts raised\n';
+    metrics += '# TYPE bridge_monitor_alerts_all counter\n';
+    metrics += `bridge_monitor_alerts_all ${total}\n`;
+
+    res.set('Content-Type', 'text/plain');
+    res.send(metrics);
   });
 
   app.listen(port, () => {
@@ -264,13 +293,7 @@ async function checkChainHealth(detector: AnomalyDetector): Promise<void> {
       dccLatencyMs: dccLatency,
     });
 
-    // Calculate approximate block difference (Solana ~400ms slots, DCC ~3s blocks)
-    // This is a rough estimate for desync detection
-    const blockDifference = Math.abs(
-      Math.floor(solSlot / 7.5) - dccHeight
-    );
-
-    detector.checkChainSync(solLatency / 1000, dccLatency / 1000, blockDifference);
+    detector.checkChainSync(solLatency / 1000, dccLatency / 1000, solSlot, dccHeight);
   } catch (err: any) {
     logger.error('Chain health check failed', { error: err.message });
   }
@@ -337,7 +360,7 @@ async function triggerEmergencyPause(alert: AnomalyAlert): Promise<void> {
       logger.error('No GUARDIAN_KEY_PATH configured — cannot auto-pause Solana');
     } else {
       const fs = await import('fs');
-      const { Keypair, TransactionMessage, VersionedTransaction, SystemProgram } = await import('@solana/web3.js');
+      const { Keypair, TransactionMessage, VersionedTransaction } = await import('@solana/web3.js');
       const crypto = await import('crypto');
 
       const keypairData = JSON.parse(fs.readFileSync(guardianKeyPath, 'utf-8'));

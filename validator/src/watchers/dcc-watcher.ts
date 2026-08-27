@@ -37,6 +37,7 @@ export class DccWatcher extends EventEmitter {
   private config: DccWatcherConfig;
   private logger: Logger;
   private isRunning: boolean = false;
+  private isSeeded = false;
   private lastProcessedHeight: number = 0;
   private pendingBurns: Map<string, DccBurnEvent> = new Map();
 
@@ -61,13 +62,42 @@ export class DccWatcher extends EventEmitter {
       requiredConfirmations: this.config.requiredConfirmations,
     });
 
-    // Get current height to start watching from
-    this.lastProcessedHeight = await this.getCurrentHeight();
-    this.logger.info('Starting from height', { height: this.lastProcessedHeight });
+    // Seed the starting height in the background.
+    //
+    // main() awaits this before starting P2P, so blocking here on an
+    // unreachable DCC node would stall the whole validator, and throwing
+    // would exit the process. Neither is acceptable for a transient outage:
+    // the Solana side and P2P must keep running and the DCC side must pick
+    // itself up when the node returns.
+    void this.seedHeightThenPoll();
+  }
 
-    // Start polling loop
-    this.runPollLoop();
-    this.runFinalityLoop();
+  /**
+   * Retry the starting-height fetch until it succeeds, then begin polling.
+   *
+   * The poll loop is only started once seeded — with lastProcessedHeight left
+   * at 0 it would try to scan every block from genesis.
+   */
+  private async seedHeightThenPoll(): Promise<void> {
+    let delayMs = 2000;
+
+    while (this.isRunning) {
+      try {
+        this.lastProcessedHeight = await this.getCurrentHeight();
+        this.isSeeded = true;
+        this.logger.info('Starting from height', { height: this.lastProcessedHeight });
+        this.runPollLoop();
+        this.runFinalityLoop();
+        return;
+      } catch (err: any) {
+        this.logger.warn('DCC height fetch failed — retrying', {
+          retryInMs: delayMs,
+          error: err?.message,
+        });
+        await sleep(delayMs);
+        delayMs = Math.min(delayMs * 2, 30000);
+      }
+    }
   }
 
   async stop(): Promise<void> {
@@ -150,7 +180,7 @@ export class DccWatcher extends EventEmitter {
   /**
    * Parse a burn event from a DCC transaction
    */
-  private async parseBurnEvent(tx: any, height: number): Promise<DccBurnEvent | null> {
+  private async parseBurnEvent(tx: any, _height: number): Promise<DccBurnEvent | null> {
     try {
       // Extract burn details from state changes
       const stateChanges = tx.stateChanges;
@@ -308,9 +338,17 @@ export class DccWatcher extends EventEmitter {
     return response.data.height;
   }
 
-  getHealth(): { running: boolean; pendingBurns: number; lastHeight: number } {
+  getHealth(): {
+    running: boolean;
+    seeded: boolean;
+    pendingBurns: number;
+    lastHeight: number;
+  } {
     return {
       running: this.isRunning,
+      // false while the DCC node is unreachable — the watcher is up but is
+      // not yet scanning blocks.
+      seeded: this.isSeeded,
       pendingBurns: this.pendingBurns.size,
       lastHeight: this.lastProcessedHeight,
     };

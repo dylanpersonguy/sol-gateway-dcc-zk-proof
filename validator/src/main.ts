@@ -50,7 +50,7 @@ const logger = createLogger('Main');
 async function main(): Promise<void> {
   logger.info('═══════════════════════════════════════════');
   logger.info('  SOL ⇄ DCC Bridge Validator Node v2.0.0');
-  logger.info('  Phase 1: Committee Minting | Phase 2: ZK Proofs');;
+  logger.info('  Phase 1: Committee Minting | Phase 2: ZK Proofs');
   logger.info('═══════════════════════════════════════════');
 
   // Load configuration
@@ -428,7 +428,10 @@ async function main(): Promise<void> {
         try {
           await fetch(`${API_URL}/api/v1/transfer/notify-complete`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'x-internal-key': process.env.INTERNAL_API_KEY || '',
+            },
             body: JSON.stringify({ transferId: result.transferId, status: 'completed' }),
           });
         } catch {}

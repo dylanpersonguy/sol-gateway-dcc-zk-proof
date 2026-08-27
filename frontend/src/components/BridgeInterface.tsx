@@ -1,9 +1,9 @@
 import React from 'react';
-import { useBridgeStore, BridgeDirection } from '../hooks/useBridgeStore';
+import { useBridgeStore } from '../hooks/useBridgeStore';
 import { DepositForm } from './DepositForm';
 import { RedeemForm } from './RedeemForm';
 import { TransferProgress } from './TransferProgress';
-import { TokenSelector, TokenLogo } from './TokenSelector';
+import { TokenLogo } from './TokenSelector';
 import { BRIDGE_TOKENS, CATEGORY_LABELS, type BridgeToken } from '../config/tokens';
 
 export function BridgeInterface() {

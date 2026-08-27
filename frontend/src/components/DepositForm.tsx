@@ -26,7 +26,6 @@ export function DepositForm() {
   const [copied, setCopied] = useState<string | null>(null);
 
   const walletConnected = !!publicKey && !!signTransaction;
-  const isNativeSOL = selectedToken.splMint === 'So11111111111111111111111111111111111111112';
 
   // ── Fee Calculation ──
   const feeQuote = useMemo(() => {

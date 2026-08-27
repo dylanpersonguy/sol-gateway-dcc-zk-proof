@@ -1,4 +1,7 @@
 # Prometheus scrape configuration for SOL ⇄ DCC Bridge
+#
+# NOTE: validators expose /metrics on their HEALTH_CHECK_PORT, not METRICS_PORT —
+# validator/src/main.ts registers /metrics on the single health server.
 
 global:
   scrape_interval: 15s
@@ -7,19 +10,19 @@ global:
 scrape_configs:
   - job_name: "validator-1"
     static_configs:
-      - targets: ["validator-1:9090"]
+      - targets: ["validator-1:8080"]
         labels:
           node_id: "validator-1"
 
   - job_name: "validator-2"
     static_configs:
-      - targets: ["validator-2:9091"]
+      - targets: ["validator-2:8081"]
         labels:
           node_id: "validator-2"
 
   - job_name: "validator-3"
     static_configs:
-      - targets: ["validator-3:9092"]
+      - targets: ["validator-3:8082"]
         labels:
           node_id: "validator-3"
 
@@ -28,3 +31,9 @@ scrape_configs:
       - targets: ["monitor:9095"]
         labels:
           component: "monitor"
+
+  - job_name: "reconciler"
+    static_configs:
+      - targets: ["reconciler:9096"]
+        labels:
+          component: "reconciler"

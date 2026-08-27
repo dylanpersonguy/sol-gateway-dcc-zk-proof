@@ -6,7 +6,7 @@ RUN npm install
 COPY tsconfig.base.json /tsconfig.base.json
 COPY monitoring/tsconfig.json ./
 COPY monitoring/src/ ./src/
-RUN npx tsc || true
+RUN npx tsc
 
 FROM node:20-alpine
 WORKDIR /app
@@ -19,4 +19,4 @@ RUN mkdir -p /app/logs && chown -R bridge:bridge /app/logs
 USER bridge
 
 EXPOSE 9091
-CMD ["node", "dist/main.js"]
+CMD ["sh", "-c", "MONITOR_PORT=${PORT:-9091} node dist/main.js"]

@@ -1,7 +1,3 @@
-import { useConnection } from '@solana/wallet-adapter-react';
-import { usePhantom } from '../context/PhantomContext';
-import { useWallet } from '@solana/wallet-adapter-react';
-import { bridgeApi } from '../services/api';
 import {
   PublicKey,
   SystemProgram,
@@ -9,7 +5,6 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
-import toast from 'react-hot-toast';
 
 const DEPOSIT_DISC = new Uint8Array([242, 35, 198, 137, 82, 225, 242, 182]);
 

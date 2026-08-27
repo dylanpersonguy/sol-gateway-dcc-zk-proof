@@ -179,6 +179,30 @@ services:
           memory: 256M
           cpus: "0.25"
 
+  # ── Reconciliation daemon ──────────────────────────────────
+  # Independently re-derives locked-vs-minted balances across both chains and
+  # alerts on drift. Same image as the monitor, different entrypoint.
+  reconciler:
+    build:
+      context: .
+      dockerfile: monitoring/Dockerfile
+    command: ["node", "dist/reconciliation.js"]
+    env_file: .env
+    environment:
+      RECONCILE_METRICS_PORT: "9096"
+      NODE_ENV: production
+    ports:
+      - "9096:9096"
+    restart: unless-stopped
+    networks:
+      - bridge-net
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
+
   # ── Prometheus ─────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.51.0

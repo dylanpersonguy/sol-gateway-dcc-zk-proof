@@ -15,7 +15,7 @@ COPY validator/src/ ./src/
 RUN npx esbuild src/main.ts --bundle --platform=node --target=node22 \
     --outfile=dist/main.js --format=cjs \
     --external:snarkjs --external:js-sha3 --external:@solana/* --external:@coral-xyz/* \
-    --external:ws --external:prom-client 2>&1 || npx tsc || true
+    --external:ws --external:prom-client 2>&1 || npx tsc
 
 FROM node:22-alpine
 WORKDIR /app

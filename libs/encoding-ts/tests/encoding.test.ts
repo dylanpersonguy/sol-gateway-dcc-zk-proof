@@ -25,8 +25,6 @@ import {
   parseDepositMessage,
   hexToBytes,
   bytesToHex,
-  DEPOSIT_PREIMAGE_LENGTH,
-  UNLOCK_PREIMAGE_LENGTH,
   BN128_ORDER,
   DepositEnvelope,
 } from '../index';
@@ -280,14 +278,29 @@ describe('Cross-Vector Collision Tests', () => {
     expect(h1).not.toBe(v30.expected_message_id);
   });
 
-  it('All deposit vectors produce unique message_ids', () => {
-    const hashes = new Set<string>();
+  it('Distinct field sets produce distinct message_ids', () => {
+    // The property that matters is collision resistance: two DIFFERENT inputs
+    // must never share a message_id. Two vectors with identical fields sharing
+    // one is correct behaviour, not a collision — the spec set contains such a
+    // pair (V-008 and V-B10 encode the same envelope), so key on the fields.
+    const byMessageId = new Map<string, string>();
+
     for (const vec of vectorData.vectors) {
-      if (vec.expected_message_id) {
-        expect(hashes.has(vec.expected_message_id)).toBe(false);
-        hashes.add(vec.expected_message_id);
+      if (!vec.expected_message_id) continue;
+      const fingerprint = JSON.stringify(vec.fields);
+      const seen = byMessageId.get(vec.expected_message_id);
+
+      if (seen !== undefined) {
+        expect(
+          seen,
+          `message_id ${vec.expected_message_id} produced by two different field sets (${vec.id})`,
+        ).toBe(fingerprint);
+      } else {
+        byMessageId.set(vec.expected_message_id, fingerprint);
       }
     }
+
+    expect(byMessageId.size).toBeGreaterThan(0);
   });
 });
 

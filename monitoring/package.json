@@ -1,12 +1,15 @@
 {
   "name": "@sol-gateway-dcc/monitoring",
   "version": "1.0.0",
-  "description": "Independent bridge monitoring — anomaly detection, alerting, auto-pause",
+  "description": "Independent bridge monitoring \u2014 anomaly detection, alerting, auto-pause",
   "private": true,
   "scripts": {
     "build": "tsc",
     "start": "ts-node src/main.ts",
-    "dev": "ts-node-dev --respawn src/main.ts"
+    "dev": "ts-node-dev --respawn src/main.ts",
+    "reconcile": "ts-node src/reconciliation.ts",
+    "reconcile:dev": "ts-node-dev --respawn src/reconciliation.ts",
+    "start:reconcile": "node dist/reconciliation.js"
   },
   "dependencies": {
     "@solana/web3.js": "^1.91.0",

@@ -28,16 +28,13 @@ import {
   libs,
 } from '@decentralchain/decentralchain-transactions';
 import {
-  signBytes as dccSignBytes,
   publicKey as dccPublicKey,
-  base58Decode as dccBase58Decode,
 } from '@decentralchain/ts-lib-crypto';
 import * as snarkjs from 'snarkjs';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fork, ChildProcess } from 'child_process';
 import { createLogger } from '../utils/logger';
-import { ValidatorConfig } from '../config';
 import { SolanaDepositEvent } from '../watchers/solana-watcher';
 import {
   DOMAIN_SEP,
@@ -759,7 +756,6 @@ export class ZkBridgeService extends EventEmitter {
     if (window.proposalId === null) return;
 
     const maxAttempts = 30;
-    const rootHex = bytesToHex(window.merkleRoot!);
 
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise(r => setTimeout(r, 10_000)); // 10s poll interval
@@ -1040,7 +1036,7 @@ export class ZkBridgeService extends EventEmitter {
     eventIdx: number,
     proofBytes: Uint8Array,
     inputsBytes: Uint8Array,
-    messageId: Uint8Array,
+    _messageId: Uint8Array,
   ): Promise<void> {
     const proofBase64 = Buffer.from(proofBytes).toString('base64');
     const inputsBase64 = Buffer.from(inputsBytes).toString('base64');
@@ -1154,7 +1150,10 @@ export class ZkBridgeService extends EventEmitter {
       const apiUrl = process.env.API_URL || 'http://api:3000';
       await fetch(`${apiUrl}/api/v1/transfer/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+        'Content-Type': 'application/json',
+        'x-internal-key': process.env.INTERNAL_API_KEY || '',
+      },
         body: JSON.stringify({
           transferId: event.transferId,
           sender: event.sender,
@@ -1166,7 +1165,10 @@ export class ZkBridgeService extends EventEmitter {
       }).catch(() => {});
       await fetch(`${apiUrl}/api/v1/transfer/notify-complete`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+        'Content-Type': 'application/json',
+        'x-internal-key': process.env.INTERNAL_API_KEY || '',
+      },
         body: JSON.stringify({
           transferId: event.transferId,
           status: 'completed',
@@ -1191,7 +1193,10 @@ export class ZkBridgeService extends EventEmitter {
     const apiUrl = process.env.API_URL || 'http://api:3000';
     fetch(`${apiUrl}/api/v1/transfer/notify-complete`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-key': process.env.INTERNAL_API_KEY || '',
+      },
       body: JSON.stringify({ transferId, status }),
     }).catch(() => {}); // Non-critical
   }

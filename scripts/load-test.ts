@@ -25,7 +25,6 @@ import {
   VersionedTransaction,
   SystemProgram,
   LAMPORTS_PER_SOL,
-  sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
@@ -77,7 +76,7 @@ const PROFILES: Record<string, LoadProfile> = {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function loadKeypair(keyPath: string): Keypair {
+function _loadKeypair(keyPath: string): Keypair {
   const resolved = keyPath.startsWith('~')
     ? path.join(process.env.HOME!, keyPath.slice(1))
     : keyPath;
@@ -93,7 +92,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function anchorDiscriminator(name: string): Buffer {
+function _anchorDiscriminator(name: string): Buffer {
   return createHash('sha256')
     .update(`global:${name}`)
     .digest()
@@ -246,7 +245,7 @@ async function runLoadTest(profile: LoadProfile): Promise<void> {
     [Buffer.from('vault')],
     PROGRAM_ID,
   );
-  const [bridgeConfigPda] = PublicKey.findProgramAddressSync(
+  const [_bridgeConfigPda] = PublicKey.findProgramAddressSync(
     [Buffer.from('bridge_config')],
     PROGRAM_ID,
   );
