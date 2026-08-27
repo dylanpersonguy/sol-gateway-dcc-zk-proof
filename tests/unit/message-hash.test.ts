@@ -22,10 +22,9 @@ import {
   DOMAIN_SEP,
   SOL_CHAIN_ID,
   DCC_CHAIN_ID,
-  MERKLE_TREE_DEPTH,
 } from '../../zk/prover/src/message.js';
-import { MerkleTree, MerkleProof } from '../../zk/prover/src/merkle.js';
-import { MESSAGE_ID_VECTORS, ADVERSARIAL_VECTORS } from '../vectors/test-vectors.js';
+import { MerkleTree } from '../../zk/prover/src/merkle.js';
+import { MESSAGE_ID_VECTORS } from '../vectors/test-vectors.js';
 
 describe('ZK Bridge Message Hashing', () => {
   it('should compute deterministic message_id for vector_1 (basic deposit)', () => {

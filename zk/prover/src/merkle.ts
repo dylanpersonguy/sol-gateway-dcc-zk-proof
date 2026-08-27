@@ -79,31 +79,37 @@ export class MerkleTree {
     this.leafCount = messageIds.length;
     const emptyHashes = this.getEmptyHashes();
 
-    // Build leaf layer
-    const numLeaves = maxLeaves;
-    this.layers[0] = new Array(numLeaves);
-
+    // Only the prefix of each level that covers a real leaf is materialised.
+    // Every node beyond it spans nothing but empty leaves, so its value is
+    // already known: emptyHashes[level]. Building all 2^depth leaves instead
+    // cost ~10s per tree at depth 20 for a single real leaf.
+    this.layers[0] = new Array(messageIds.length);
     for (let i = 0; i < messageIds.length; i++) {
       this.layers[0][i] = computeLeaf(messageIds[i]);
     }
-    // Fill remaining with empty leaf
-    for (let i = messageIds.length; i < numLeaves; i++) {
-      this.layers[0][i] = emptyHashes[0];
-    }
 
-    // Build layers bottom-up
     for (let level = 1; level <= this.depth; level++) {
-      const prevLayer = this.layers[level - 1];
-      const layerSize = prevLayer.length / 2;
-      this.layers[level] = new Array(layerSize);
+      const prev = this.layers[level - 1];
+      // At least one node per level so the root stays at layers[depth][0].
+      const size = Math.max(1, Math.ceil(prev.length / 2));
+      this.layers[level] = new Array(size);
 
-      for (let i = 0; i < layerSize; i++) {
-        this.layers[level][i] = hashPair(
-          prevLayer[2 * i],
-          prevLayer[2 * i + 1]
-        );
+      for (let i = 0; i < size; i++) {
+        const l = 2 * i < prev.length ? prev[2 * i] : emptyHashes[level - 1];
+        const r = 2 * i + 1 < prev.length ? prev[2 * i + 1] : emptyHashes[level - 1];
+        this.layers[level][i] = hashPair(l, r);
       }
     }
+  }
+
+  /**
+   * Node value at (level, index), materialised or implied.
+   * Anything past the stored prefix spans only empty leaves.
+   */
+  private nodeAt(level: number, index: number): Uint8Array {
+    const layer = this.layers[level];
+    if (layer && index < layer.length) return layer[index];
+    return this.getEmptyHashes()[level];
   }
 
   /**
@@ -133,7 +139,7 @@ export class MerkleTree {
       const siblingIndex = isRight ? currentIndex - 1 : currentIndex + 1;
 
       pathIndices.push(isRight ? 1 : 0);
-      siblings.push(this.layers[level][siblingIndex]);
+      siblings.push(this.nodeAt(level, siblingIndex));
 
       currentIndex = Math.floor(currentIndex / 2);
     }

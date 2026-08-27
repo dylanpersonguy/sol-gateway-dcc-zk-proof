@@ -7,10 +7,8 @@
  */
 
 import { expect } from 'chai';
-import { keccak256 } from 'ethers';
 import {
   computeMessageId,
-  computeLeaf,
   bytesToBitsLE,
   numberToBitsLE,
   hexToBytes,

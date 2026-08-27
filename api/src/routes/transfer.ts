@@ -2,6 +2,7 @@
 // TRANSFER STATUS ROUTE
 // ═══════════════════════════════════════════════════════════════
 
+import { timingSafeEqual } from 'crypto';
 import { Router, Request, Response, NextFunction } from 'express';
 import { createLogger } from '../utils/logger';
 import {
@@ -133,7 +134,37 @@ transferRouter.post('/register', async (req: Request, res: Response, next: NextF
  * Internal endpoint called by validators after verifyAndMint succeeds.
  * Updates the transfer status to 'completed' and broadcasts via SSE.
  */
-transferRouter.post('/notify-complete', async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * Guards the validator-only notify-complete endpoint.
+ *
+ * Without this, anyone who can reach the API could mark any transfer
+ * `completed` with an arbitrary destination tx hash — which is then pushed
+ * to every SSE subscriber watching that transfer.
+ *
+ * Fail-closed: if INTERNAL_API_KEY is unset the endpoint is disabled, the
+ * same posture requireAdminKey() takes in admin.ts.
+ */
+function requireInternalKey(req: Request, res: Response, next: NextFunction) {
+  const internalKey = process.env.INTERNAL_API_KEY;
+  if (!internalKey) {
+    logger.error('INTERNAL_API_KEY is not configured — notify-complete is disabled');
+    return res.status(503).json({ error: 'Internal API not configured' });
+  }
+
+  const provided =
+    (req.headers['x-internal-key'] as string) ||
+    req.headers.authorization?.replace('Bearer ', '');
+
+  if (!provided || provided.length !== internalKey.length ||
+      !timingSafeEqual(Buffer.from(provided), Buffer.from(internalKey))) {
+    logger.warn('Unauthorized notify-complete attempt', { ip: req.ip });
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  return next();
+}
+
+transferRouter.post('/notify-complete', requireInternalKey, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { transferId, status, destTxHash } = req.body;
 
@@ -179,7 +210,7 @@ transferRouter.get('/:id', async (req: Request, res: Response, next: NextFunctio
 
     const dccCfg = getDccConfig();
     let status: TransferStatus = dbTransfer?.status || 'pending_confirmation';
-    let destinationTxHash: string | null = dbTransfer?.dest_tx_hash || null;
+    const destinationTxHash: string | null = dbTransfer?.dest_tx_hash || null;
 
     // If not yet completed, resolve from on-chain sources
     if (status !== 'completed') {

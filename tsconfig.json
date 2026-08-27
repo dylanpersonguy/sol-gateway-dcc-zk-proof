@@ -8,7 +8,14 @@
     "resolveJsonModule": true,
     "outDir": "./dist",
     "rootDir": ".",
-    "types": ["mocha", "chai", "node"]
+    "types": [
+      "mocha",
+      "chai",
+      "node"
+    ]
   },
-  "include": ["tests/**/*.ts"]
+  "include": [
+    "tests/**/*.ts",
+    "zk/prover/src/**/*.d.ts"
+  ]
 }

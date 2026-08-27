@@ -27,8 +27,6 @@ import {
   PublicKey,
   SystemProgram,
   LAMPORTS_PER_SOL,
-  Transaction,
-  sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import * as anchor from '@coral-xyz/anchor';
 import * as fs from 'fs';
@@ -43,7 +41,6 @@ import {
   SOL_CHAIN_ID,
   DCC_CHAIN_ID,
   MERKLE_TREE_DEPTH,
-  hexToBytes,
   bytesToHex,
 } from '../../zk/prover/src/index.js';
 
@@ -178,7 +175,7 @@ async function depositSol(
 // Step 2: Wait for checkpoint to be activated
 // ──────────────────────────────────────────────────────────────
 
-async function waitForActiveCheckpoint(
+async function _waitForActiveCheckpoint(
   connection: Connection,
   afterSlot: number,
   timeoutMs = 120_000
@@ -230,7 +227,7 @@ async function waitForActiveCheckpoint(
 // Step 3: Collect deposits in checkpoint window
 // ──────────────────────────────────────────────────────────────
 
-async function collectDepositsInWindow(
+async function _collectDepositsInWindow(
   connection: Connection,
   checkpointSlot: number
 ): Promise<DepositEvent[]> {
@@ -245,7 +242,7 @@ async function collectDepositsInWindow(
   });
 
   const events: DepositEvent[] = [];
-  for (const { pubkey, account } of accounts) {
+  for (const { pubkey } of accounts) {
     // In production: use anchor to deserialize DepositRecord
     // For now, show the flow
     log('COLLECT', `Found deposit record: ${pubkey.toBase58()}`);

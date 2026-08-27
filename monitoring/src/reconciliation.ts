@@ -15,9 +15,15 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import axios from 'axios';
 import winston from 'winston';
 import dotenv from 'dotenv';
+import path from 'path';
 import { Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 
-dotenv.config();
+// Load .env from the workspace root (parent of monitoring/).
+// A bare dotenv.config() resolves against cwd, so running from monitoring/
+// silently loaded nothing and every value fell through to its default —
+// localhost:8899 and the System Program instead of the bridge on mainnet.
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config(); // also pick up monitoring/.env if present
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -249,11 +255,27 @@ export class ReconciliationDaemon {
         ? Number(drift) / Number(netLocked) * 100
         : 0;
 
+      // Positive drift (DCC supply exceeds SOL locked) is the insolvency
+      // direction and escalates to critical.
+      //
+      // Negative drift means SOL is locked that never minted wSOL — not an
+      // insolvency, but it is stuck user funds, so it must not stay silent.
+      // Guarding both tiers on `drift > 0n` reported 'ok' for an unbounded
+      // shortfall while the monitor's own supply check was warning on it.
+      const absDrift = drift < 0n ? -drift : drift;
+
       let status: 'ok' | 'warn' | 'critical' = 'ok';
       if (drift > 0n && drift >= this.config.criticalDriftLamports) {
         status = 'critical';
       } else if (drift > 0n && drift >= this.config.warnDriftLamports) {
         status = 'warn';
+      } else if (drift < 0n && absDrift >= this.config.warnDriftLamports) {
+        status = 'warn';
+        logger.warn('SOL locked without corresponding wSOL supply', {
+          netLocked: netLocked.toString(),
+          dccNetSupply: dccNetSupply.toString(),
+          shortfall: absDrift.toString(),
+        });
       }
 
       // Also check vault balance vs net locked (should be >= net locked)
@@ -407,7 +429,7 @@ export class ReconciliationDaemon {
       promises.push(
         axios.post(this.config.slackWebhookUrl, {
           text: `🚨 *Bridge Reconciliation — ${severity}*\n${message}\n\`\`\`${JSON.stringify(data, null, 2)}\`\`\``,
-        }).then(() => {}).catch((err) => logger.warn('Slack alert failed', { error: err.message })),
+        }).then(() => {}).catch((err) => { logger.warn('Slack alert failed', { error: err.message }); }),
       );
     }
 
@@ -423,14 +445,14 @@ export class ReconciliationDaemon {
             component: 'cross-chain-balance',
             custom_details: data,
           },
-        }).then(() => {}).catch((err) => logger.warn('PagerDuty alert failed', { error: err.message })),
+        }).then(() => {}).catch((err) => { logger.warn('PagerDuty alert failed', { error: err.message }); }),
       );
     }
 
     if (this.config.alertWebhookUrl) {
       promises.push(
         axios.post(this.config.alertWebhookUrl, { severity, message, data, timestamp: Date.now() })
-          .then(() => {}).catch((err) => logger.warn('Webhook alert failed', { error: err.message })),
+          .then(() => {}).catch((err) => { logger.warn('Webhook alert failed', { error: err.message }); }),
       );
     }
 
@@ -467,7 +489,9 @@ async function main(): Promise<void> {
   const daemon = new ReconciliationDaemon(config);
 
   // ── Prometheus /metrics endpoint ──
-  const metricsPort = parseInt(process.env.RECONCILE_METRICS_PORT || '9091', 10);
+  // 9096, not 9091 — the monitor (MONITOR_PORT) already defaults to 9091,
+  // so sharing it meant whichever started second died with EADDRINUSE.
+  const metricsPort = parseInt(process.env.RECONCILE_METRICS_PORT || '9096', 10);
   const app = (await import('express')).default();
 
   app.get('/metrics', async (_req: any, res: any) => {

@@ -18,7 +18,6 @@ import WebSocket from 'ws';
 const { WebSocketServer } = require('ws');
 import { createLogger } from '../utils/logger';
 import { Logger } from 'winston';
-import * as nacl from 'tweetnacl';
 import * as crypto from 'crypto';
 import * as https from 'https';
 import * as fs from 'fs';
@@ -306,23 +305,21 @@ export class P2PTransport extends EventEmitter {
   private handleMessage(msg: P2PMessage, peer: PeerConnection): void {
     peer.lastSeen = Date.now();
 
-    // ── SECURITY: Verify message signature for all message types ──
-    // SECURITY FIX (VAL-2): Previously only attestation signatures were
-    // verified downstream. peer_list messages were accepted without any
-    // authentication, allowing eclipse attacks via injected peer lists.
-    if (msg.signature && this.verifyFn && msg.nodeId) {
-      try {
-        const msgBytes = Buffer.from(JSON.stringify({
-          type: msg.type,
-          nodeId: msg.nodeId,
-          payload: msg.payload,
-          timestamp: msg.timestamp,
-        }));
-        const sigBuf = Buffer.from(msg.signature, 'base64');
-        // We verify if we can, but we don't reject heartbeats from unknown peers
-        // (they need to identify themselves first)
-      } catch {}
-    }
+    // NOTE: transport-level message signing is NOT active. setCrypto() is never
+    // called by main.ts, so signFn/verifyFn are null — outbound messages carry
+    // no signature and there is nothing to verify inbound. A previous version of
+    // this block built the signing preimage and then discarded it without
+    // calling verifyFn, which read as authentication but performed none.
+    //
+    // What actually protects each message type today:
+    //   • attestation / attestation_request — ConsensusEngine.receiveAttestation()
+    //     checks the validator whitelist, binds nodeId to the signing key, and
+    //     verifies the DCC signature. That is the security-critical path.
+    //   • peer_list — the `this.peers.has(msg.nodeId)` guard below, plus a cap on
+    //     gossiped addresses. This is membership-based, not cryptographic.
+    //
+    // Wiring setCrypto() would add defence-in-depth for gossip; it is not what
+    // guards mint/unlock authorisation.
 
     if (msg.type === 'attestation' || msg.type === 'attestation_request') {
       if (!msg.payload) {

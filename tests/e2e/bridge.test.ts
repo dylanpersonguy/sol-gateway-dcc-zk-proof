@@ -212,6 +212,7 @@ describe("sol_bridge_lock", () => {
     largeWithdrawalThreshold: new BN(10 * LAMPORTS_PER_SOL),
     dccChainId: 87,
     solanaChainId: 1,
+    resumeDelaySeconds: new BN(300), // program requires >= 300
   };
 
   // ═══════════════════════════════════════════════════════
@@ -875,6 +876,7 @@ describe("sol_bridge_lock", () => {
           minValidators: null,
           newAuthority: null,
           newGuardian: null,
+          resumeDelaySeconds: null,
         })
         .accountsPartial({
           bridgeConfig: bridgeConfigPda,
@@ -902,6 +904,7 @@ describe("sol_bridge_lock", () => {
             minValidators: null,
             newAuthority: null,
             newGuardian: null,
+          resumeDelaySeconds: null,
           })
           .accountsPartial({
             bridgeConfig: bridgeConfigPda,
@@ -929,6 +932,7 @@ describe("sol_bridge_lock", () => {
             minValidators: null,
             newAuthority: null,
             newGuardian: null,
+          resumeDelaySeconds: null,
           })
           .accountsPartial({
             bridgeConfig: bridgeConfigPda,

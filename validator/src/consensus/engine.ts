@@ -192,7 +192,13 @@ export class ConsensusEngine extends EventEmitter {
     const publicKey = this.getPublicKey();
 
     const localAttestation: Attestation = {
-      nodeId: this.config.nodeId,
+      // VAL-6 (see receiveAttestation) requires an attestation's nodeId to be
+      // the hex of its signing key, so that a node cannot claim someone else's
+      // identity. Stamping config.nodeId here ("validator-1") meant every peer
+      // attestation failed that check and consensus could never reach its
+      // threshold. Dedup at line ~307 keys on this too, and keying it on the
+      // public key is what actually stops one validator being counted twice.
+      nodeId: publicKey.toString('hex'),
       transferId,
       type,
       signature,

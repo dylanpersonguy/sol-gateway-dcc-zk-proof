@@ -100,7 +100,7 @@ function initState(): BridgeState {
 const MIN_DEPOSIT = 100_000n;          // 0.0001 SOL
 const MAX_DEPOSIT = 50_000_000_000n;   // 50 SOL
 const MAX_UNLOCK = 50_000_000_000n;    // 50 SOL
-const LARGE_THRESHOLD = 10_000_000_000n; // 10 SOL
+const _LARGE_THRESHOLD = 10_000_000_000n; // 10 SOL
 
 function deposit(state: BridgeState, user: string, amount: bigint): boolean {
   // INV-7: pause check
@@ -260,13 +260,13 @@ function checkInvariant1(state: BridgeState): boolean {
   return outstandingLamports <= state.vaultBalance;
 }
 
-function checkInvariant2_deposits(state: BridgeState): boolean {
+function _checkInvariant2_deposits(_state: BridgeState): boolean {
   // INV-2: deposit set size is exact (no duplicates snuck in)
   // Enforced by Set — if a replay was accepted, set size wouldn't match op count
   return true; // structural guarantee of Set<string>
 }
 
-function checkInvariant7(state: BridgeState, opResult: boolean): boolean {
+function _checkInvariant7(_state: BridgeState, _opResult: boolean): boolean {
   // INV-7: if paused, no operation should return success
   // This is checked per-operation at call site
   return true;
@@ -347,7 +347,7 @@ interface SimulationResult {
   };
 }
 
-function runSimulation(iterations: number, seed?: number): SimulationResult {
+function runSimulation(iterations: number, _seed?: number): SimulationResult {
   const state = initState();
   const users = Array.from({ length: 10 }, () => randomUser());
   const depositHistory: Array<{ transferId: string; amount: bigint }> = [];
@@ -446,7 +446,7 @@ function runSimulation(iterations: number, seed?: number): SimulationResult {
         const idx = Math.floor(Math.random() * depositHistory.length);
         const dep = depositHistory[idx];
         // Try to re-mint the same deposit
-        const result = committeeMint(state, dep.transferId, dep.amount);
+        const _result = committeeMint(state, dep.transferId, dep.amount);
         // If the mint was already processed, this should fail
         // (first attempt may succeed, second must not)
       }
@@ -520,6 +520,15 @@ function runSimulation(iterations: number, seed?: number): SimulationResult {
       };
     }
 
+    // INV-8 (DCC side) was defined but never asserted, so the hourly mint cap
+    // this model already tracks was going unchecked.
+    if (!checkInvariant8_dcc(state)) {
+      return {
+        passed: false, failedAt: i, stats,
+        reason: `INV-8-DCC VIOLATED: hourlyMinted=${state.hourlyMinted} > max=${state.maxHourlyMint} while unpaused`,
+      };
+    }
+
     if (!checkSupplyNonNegative(state)) {
       return {
         passed: false, failedAt: i, stats,
@@ -555,8 +564,8 @@ function testInvariant4_InvalidProofs(): boolean {
 
   // Setup: deposit some SOL
   deposit(state, 'alice', 10_000_000_000n); // 10 SOL
-  const mintedBefore = state.totalMinted;
-  const processedBefore = state.processedMints.size;
+  const _mintedBefore = state.totalMinted;
+  const _processedBefore = state.processedMints.size;
 
   // Simulate invalid proof attempt — the mint function checks replay,
   // but a real invalid proof would never reach mint. We verify that
@@ -579,7 +588,7 @@ function testInvariant6_ReplayPersistence(): boolean {
   const state = initState();
 
   deposit(state, 'bob', 5_000_000_000n);
-  const nonce = state.userNonces.get('bob') ?? 0n;
+  const _nonce = state.userNonces.get('bob') ?? 0n;
   const transferId = crypto.createHash('sha256')
     .update('bob:0')
     .digest('hex');

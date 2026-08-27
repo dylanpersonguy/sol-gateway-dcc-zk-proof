@@ -23,7 +23,6 @@ import {
   PublicKey,
   TransactionMessage,
   VersionedTransaction,
-  SystemProgram,
 } from '@solana/web3.js';
 import * as multisig from '@sqds/multisig';
 import { createHash } from 'crypto';

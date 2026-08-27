@@ -14,7 +14,7 @@ RUN npx esbuild src/main.ts --bundle --platform=node --target=node22 \
     --outfile=dist/main.js --format=cjs \
     --external:snarkjs --external:@solana/* --external:@coral-xyz/* \
     --external:ws --external:prom-client --external:better-sqlite3 \
-    2>&1 || npx tsc || true
+    2>&1 || npx tsc
 
 FROM node:22-alpine
 WORKDIR /app
@@ -26,5 +26,5 @@ RUN addgroup -g 1001 bridge && adduser -u 1001 -G bridge -s /bin/sh -D bridge
 RUN mkdir -p /app/logs /app/data && chown -R bridge:bridge /app/logs /app/data
 USER bridge
 
-EXPOSE 3000
-CMD ["node", "dist/main.js"]
+EXPOSE 3099
+CMD ["sh", "-c", "API_PORT=${PORT:-3099} node dist/main.js"]

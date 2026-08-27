@@ -6,6 +6,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { PublicKey } from '@solana/web3.js';
 import { createLogger } from '../utils/logger';
+import { readBridgeConfig, lamportsToSol } from '../utils/bridge-config';
 import {
   isValidDccAddress,
   buildBurnInstruction,
@@ -107,10 +108,33 @@ redeemRouter.get('/limits', async (_req: Request, res: Response, next: NextFunct
       }
     } catch { /* use defaults */ }
 
+    // Unlock limits live in the on-chain BridgeConfig. Hardcoding them here
+    // told users they could redeem 100 SOL when max_unlock_amount was 10 —
+    // the program would have rejected the transaction.
+    let maxRedeem = '100';
+    let maxDailyRedeem = '1000';
+    let remainingDailyRedeem: string | undefined;
+
+    try {
+      const cfg = await readBridgeConfig();
+      if (cfg) {
+        maxRedeem = lamportsToSol(cfg.maxUnlockAmount);
+        maxDailyRedeem = lamportsToSol(cfg.maxDailyOutflow);
+        const remaining = cfg.maxDailyOutflow > cfg.currentDailyOutflow
+          ? cfg.maxDailyOutflow - cfg.currentDailyOutflow
+          : 0n;
+        remainingDailyRedeem = lamportsToSol(remaining);
+        paused = paused || cfg.paused;
+      }
+    } catch (e: any) {
+      logger.warn('Could not read on-chain unlock limits, using defaults', { error: e.message });
+    }
+
     res.json({
       minRedeem: '0.001',
-      maxRedeem: '100',
-      maxDailyRedeem: '1000',
+      maxRedeem,
+      maxDailyRedeem,
+      remainingDailyRedeem,
       bridgeStatus: paused ? 'paused' : 'active',
       estimatedUnlockTime: '3-10 minutes',
       dccConfirmations: 10,

@@ -9,13 +9,10 @@
  * 5. Submits proofs to the DCC bridge contract for minting
  */
 
-import { Connection, PublicKey, Commitment } from '@solana/web3.js';
+import { Connection, Commitment } from '@solana/web3.js';
 import {
   computeMessageId,
   MessageFields,
-  SOL_CHAIN_ID,
-  DCC_CHAIN_ID,
-  hexToBytes,
   bytesToHex,
 } from './message.js';
 import { MerkleTree } from './merkle.js';
