@@ -204,9 +204,16 @@ async function main() {
 
   // ── 4. validators unlock on Solana ───────────────────────────
   console.log('\n[4/4] waiting for the validators to unlock on Solana');
+
+  // Watch for the balance to RISE from its post-burn low, rather than compare
+  // against a threshold derived from the deposit. The depositor also pays
+  // Solana fees and the unlock returns the amount net of the withdrawal fee,
+  // so the balance legitimately ends below `before - deposit` on a completely
+  // successful round trip — which read as a failure and polled to the timeout.
+  const afterBurn = await conn.getBalance(depositor.publicKey);
   const unlocked = await waitFor('unlock', 15 * 60 * 1000, 10000, async () => {
     const now = await conn.getBalance(depositor.publicKey);
-    return now > solBefore - Number(amountLamports) ? now : null;
+    return now > afterBurn ? now : null;
   });
 
   const solAfter = await conn.getBalance(depositor.publicKey);
@@ -214,6 +221,7 @@ async function main() {
 
   console.log('\n=== RESULT ===');
   console.log(`  SOL  before ${solBefore}  after ${solAfter}  net ${solAfter - solBefore} lamports`);
+  console.log(`  the net is negative by design: bridge fees on both legs plus Solana tx fees`);
   console.log(`  wSOL before ${wsolBefore}  after ${wsolAfter}`);
   console.log(`  deposit -> mint : OK`);
   console.log(`  burn -> unlock  : ${unlocked ? 'OK' : 'DID NOT LAND — check validator logs'}`);
