@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'fix/**', 'feat/**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Everything that needs only Node. Fast enough to gate every push.
+  gates:
+    name: Typecheck · Lint · Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # Per workspace: the root tsconfig pulls in tests/e2e, which needs the
+      # Anchor-generated IDL types and so belongs in the `anchor` job below.
+      - name: Typecheck api
+        run: npx tsc --noEmit
+        working-directory: api
+      - name: Typecheck validator
+        run: npx tsc --noEmit
+        working-directory: validator
+      - name: Typecheck monitoring
+        run: npx tsc --noEmit
+        working-directory: monitoring
+      - name: Typecheck frontend
+        run: npx tsc --noEmit
+        working-directory: frontend
+
+      - name: Lint
+        run: npx eslint . --ext .ts,.tsx
+
+      # No network: these are pure encoding/Merkle/signature checks.
+      - name: Unit tests
+        run: npx mocha --config .mocharc.yml 'unit/**/*.test.ts'
+        working-directory: tests
+      - name: Adversarial tests
+        run: npx mocha --config .mocharc.yml 'adversarial/**/*.test.ts'
+        working-directory: tests
+      - name: Security tests
+        run: npx mocha --config .mocharc.yml 'security/**/*.test.ts'
+        working-directory: tests
+      - name: Encoding vectors
+        run: npx vitest run libs/encoding-ts/tests/encoding.test.ts
+
+      - name: Frontend build
+        run: npm run build
+        working-directory: frontend
+
+  # Needs the Rust/Solana/Anchor toolchain, so it is kept separate.
+  anchor:
+    name: Anchor build · Root typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
+          avm install latest
+          avm use latest
+
+      - name: Install node deps
+        run: npm ci --no-audit --no-fund
+
+      # Also generates target/types, which tests/e2e imports.
+      - name: Anchor build
+        run: anchor build
+
+      - name: Root typecheck
+        run: npx tsc --noEmit
