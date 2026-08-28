@@ -35,3 +35,24 @@ logs/
 # Coverage
 coverage/
 .nyc_output/
+
+# Runtime state and key material — never commit.
+# These sat untracked-but-unignored while holding live mainnet keypairs;
+# a single `git add -A` would have published them.
+validator/data/
+api/data/
+**/keys/*.json
+**/keys/**/*.json
+*.enc
+*.key
+*.key.*.bak
+
+# Local scratch/debug scripts
+check-*.mjs
+dump-config.mjs
+read-config.mjs
+isolate-error.mjs
+sim-*.mjs
+simulate-*.mjs
+decode-deposits*.js
+test-dcc-invoke.cjs

@@ -37,6 +37,8 @@ export interface SolanaDepositEvent {
 export interface SolanaWatcherConfig {
   /** Where the poll cursor is persisted so a restart resumes rather than skips. */
   cursorPath?: string;
+  /** Namespaces the persisted cursor so nodes do not share one. */
+  nodeId?: string;
   rpcUrl: string;
   wsUrl: string;
   programId: string;
@@ -213,7 +215,11 @@ export class SolanaWatcher extends EventEmitter {
    */
   /** Where the poll cursor is persisted so a restart resumes rather than skips. */
   private cursorFile(): string {
-    return this.config.cursorPath || './data/solana-watcher-cursor.json';
+    // Namespaced by node: several validators sharing one data directory
+    // would otherwise share a cursor, and one node marking work done
+    // would stop the others from ever seeing it.
+    const node = this.config.nodeId || 'default';
+    return this.config.cursorPath || `./data/solana-watcher-cursor-${node}.json`;
   }
 
   /** Signature and slot last fully processed by a previous run. */

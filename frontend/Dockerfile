@@ -10,6 +10,28 @@ COPY frontend/tailwind.config.js ./
 COPY frontend/postcss.config.js ./
 COPY frontend/index.html ./
 COPY frontend/src/ ./src/
+
+# Vite inlines import.meta.env at BUILD time, so these must be present here --
+# setting them on the running container does nothing. Both have fallbacks in
+# the source, and shipping either fallback to a browser is a broken deploy:
+#   VITE_API_URL          -> "/api/v1"            (fine: nginx proxies it)
+#   VITE_SOLANA_RPC_URL   -> "http://127.0.0.1:8899"  (fatal: user's own laptop)
+ARG VITE_API_URL=""
+ARG VITE_SOLANA_RPC_URL=""
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_SOLANA_RPC_URL=$VITE_SOLANA_RPC_URL
+
+# Fail loudly instead of baking localhost into a public bundle. This exact
+# silent fallback shipped to production and made every deposit fail at
+# readNonce() with "Failed to create deposit instruction".
+RUN if [ -z "$VITE_SOLANA_RPC_URL" ]; then \
+      echo "ERROR: VITE_SOLANA_RPC_URL build arg is required." >&2; \
+      echo "  Vite bakes it in at build time; unset means the bundle talks to" >&2; \
+      echo "  http://127.0.0.1:8899 -- the visitor's own machine -- and every" >&2; \
+      echo "  deposit fails. Pass a public Solana RPC URL as a build arg." >&2; \
+      exit 1; \
+    fi
+
 RUN npm run build
 
 # nginx rather than `serve -s`: the app needs /api proxied to the API service,

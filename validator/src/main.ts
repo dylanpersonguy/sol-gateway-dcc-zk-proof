@@ -29,7 +29,6 @@ import {
   TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
-  Ed25519Program,
   AddressLookupTableAccount,
   SystemProgram,
 } from '@solana/web3.js';

@@ -20,9 +20,14 @@ let bridgeVersion = "2.0.0"
 let solChainId = 1
 let dccChainId = 2
 let domainSeparator = "SOL_DCC_BRIDGE_V2"
-let maxValidators = 20
+let maxValidators = 5
 let minValidatorThreshold = 1
 let transferExpiryBlocks = 1440
+
+# Timelock delays (blocks) — moved here from inline declarations so all
+# plain let/func declarations precede the @Callable functions, as RIDE requires
+let resumeDelayBlocks = 100
+let adminTransferDelay = 100  # ~100 blocks delay
 
 # Rate limits (apply in raw Solana smallest-unit scale)
 let maxDailyMint = 1000000000000
@@ -54,6 +59,9 @@ func keyDailyResetHeight() = "daily_reset_height"
 func keyMaxDailyMint() = "max_daily_mint"
 func keyMaxSingleMint() = "max_single_mint"
 func keyRegisteredTokenCount() = "registered_token_count"
+func keyResumeRequestedAt() = "resume_requested_at"
+func keyPendingAdmin() = "pending_admin"
+func keyAdminTransferHeight() = "admin_transfer_height"
 
 func keyValidator(index: Int) = "validator_" + index.toString()
 func keyValidatorActive(pubkey: String) = "validator_active_" + pubkey
@@ -183,7 +191,7 @@ func verifyValidatorSignatures(
         # SECURITY FIX (CRIT-5): Reject duplicate public keys.
         # Without this check, a single compromised validator key can be repeated
         # N times to reach the multi-sig threshold, breaking the entire scheme.
-        let dupIndices = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+        let dupIndices = [0,1,2,3,4]
         func outerDupCheck(hasDup: Boolean, i: Int) = {
             if (hasDup || i >= count) then hasDup
             else {
@@ -191,10 +199,10 @@ func verifyValidatorSignatures(
                     if (found || j >= i) then found
                     else pubkeys[j] == pubkeys[i]
                 }
-                FOLD<20>(dupIndices, false, innerDupCheck)
+                FOLD<5>(dupIndices, false, innerDupCheck)
             }
         }
-        let hasDuplicateKey = FOLD<20>(dupIndices, false, outerDupCheck)
+        let hasDuplicateKey = FOLD<5>(dupIndices, false, outerDupCheck)
         if (hasDuplicateKey) then throw("Duplicate public key detected — rejected")
         else {
 
@@ -211,8 +219,8 @@ func verifyValidatorSignatures(
             }
         }
         
-        let valid = FOLD<20>(
-            [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19],
+        let valid = FOLD<5>(
+            [0,1,2,3,4],
             0,
             verifyOne
         )
@@ -719,9 +727,6 @@ func emergencyResume() = {
 }
 
 # SECURITY FIX (VULN-9): Two-phase timelocked unpause
-func keyResumeRequestedAt() = "resume_requested_at"
-let resumeDelayBlocks = 100
-
 @Callable(i)
 func requestResume() = {
     if (!isAdmin(i.caller)) then throw("Only admin can request resume")
@@ -808,10 +813,6 @@ func updateMaxSingleMint(newMax: Int) = {
 }
 
 # SECURITY FIX (VULN-10): Two-phase admin transfer with timelock
-func keyPendingAdmin() = "pending_admin"
-func keyAdminTransferHeight() = "admin_transfer_height"
-let adminTransferDelay = 100  # ~100 blocks delay
-
 @Callable(i)
 func transferAdmin(newAdmin: String) = {
     if (!isAdmin(i.caller)) then throw("Unauthorized")
