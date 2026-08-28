@@ -397,6 +397,21 @@ export class ConsensusEngine extends EventEmitter {
     this.checkConsensus(transferId);
   }
 
+  /**
+   * Record a transfer as complete, once its destination-chain submission has
+   * actually landed. Replay protection on-chain is the real guard; this set
+   * stops the validator re-proposing work that is already done.
+   */
+  markSubmitted(transferId: string): void {
+    this.processedTransfers.add(transferId);
+    if (this.processedTransfers.size > ConsensusEngine.MAX_PROCESSED_TRANSFERS) {
+      const iter = this.processedTransfers.values();
+      const oldest = iter.next().value;
+      if (oldest) this.processedTransfers.delete(oldest);
+    }
+    this.persistProcessedTransfers();
+  }
+
   /** Signatures required for this attestation type. */
   private requiredFor(type: AttestationType): number {
     return type === 'unlock'
@@ -426,7 +441,13 @@ export class ConsensusEngine extends EventEmitter {
         requestTimestamp: pending.request.timestamp,
       };
 
-      this.processedTransfers.add(transferId);
+      // Deliberately NOT marked processed here. Reaching consensus only means
+      // the signatures exist; the destination-chain submission can still fail,
+      // and marking it now makes that failure permanent — the transfer is
+      // refused on every later attempt with "Transfer already processed" while
+      // the funds stay locked. main.ts calls markSubmitted() once the
+      // submission lands.
+      this.pendingConsensus.delete(transferId);
       // SECURITY FIX (VAL-10): Evict oldest entries when set exceeds max size to prevent OOM.
       if (this.processedTransfers.size > ConsensusEngine.MAX_PROCESSED_TRANSFERS) {
         const iter = this.processedTransfers.values();

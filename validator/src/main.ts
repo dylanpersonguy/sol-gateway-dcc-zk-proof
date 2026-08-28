@@ -467,6 +467,8 @@ async function main(): Promise<void> {
 
       if (result.type === 'mint') {
         await submitMintToDcc(config, result);
+        // Only now is it truly done — see markSubmitted().
+        consensus.markSubmitted(result.transferId);
         // Notify API that committee mint is complete
         const API_URL = process.env.API_URL || 'http://api:3000';
         try {
@@ -481,6 +483,7 @@ async function main(): Promise<void> {
         } catch {}
       } else {
         await submitUnlockToSolana(config, result);
+        consensus.markSubmitted(result.transferId);
       }
     } catch (err) {
       logger.error('Failed to submit consensus result', {
