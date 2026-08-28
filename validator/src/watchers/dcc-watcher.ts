@@ -240,12 +240,48 @@ export class DccWatcher extends EventEmitter {
         confirmations: 0,
       };
 
+      // The contract record carries no transaction id, and the finality check
+      // verifies the burn is in the block it claims. Recover it from the block,
+      // which is long settled by the time a sweep sees it.
+      const txId = await this.findBurnTxId(entry.key, event.height);
+      if (!txId) {
+        this.logger.warn('Reconciled burn has no locatable transaction — skipping', {
+          burnId, height: event.height,
+        });
+        continue;
+      }
+      event.txId = txId;
+
       this.logger.warn('Burn found by reconciliation that block scanning missed', {
-        burnId, height: event.height, amount: event.amount.toString(),
+        burnId, height: event.height, amount: event.amount.toString(), txId,
       });
       this.pendingBurns.set(burnId, event);
       this.markSeen(burnId);
     }
+  }
+
+  /**
+   * Find the transaction that wrote a burn record, by looking for the invocation
+   * in the block the record names. Needed because contract state records the
+   * burn but not the transaction that produced it, while finality verification
+   * checks the transaction really is in that block.
+   */
+  private async findBurnTxId(recordKey: string, height: number): Promise<string | null> {
+    try {
+      const { data: block } = await this.client.get(`/blocks/at/${height}`);
+      for (const tx of block?.transactions ?? []) {
+        if (tx.type !== 16 || tx.dApp !== this.config.bridgeContract) continue;
+        if (tx.call?.function !== 'burn' && tx.call?.function !== 'burnToken') continue;
+
+        const { data: detail } = await this.client.get(`/transactions/info/${tx.id}`);
+        const wrote = (detail?.stateChanges?.data ?? [])
+          .some((e: any) => e.key === recordKey);
+        if (wrote) return tx.id;
+      }
+    } catch (err: any) {
+      this.logger.warn('Could not locate the burn transaction', { height, error: err?.message });
+    }
+    return null;
   }
 
   /** Burn ids already handled, so a sweep does not replay them. */
