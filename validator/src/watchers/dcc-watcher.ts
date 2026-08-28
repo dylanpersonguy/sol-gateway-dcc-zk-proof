@@ -45,6 +45,8 @@ export interface DccBurnEvent {
 export interface DccWatcherConfig {
   /** Where the scan cursor is persisted so a restart resumes rather than skips. */
   cursorPath?: string;
+  /** Namespaces the persisted cursor so nodes do not share one. */
+  nodeId?: string;
   nodeUrl: string;
   /** SECURITY FIX (VAL-7): Secondary DCC node URL for multi-node verification.
    *  If set, burn events must be confirmed by BOTH nodes. */
@@ -302,7 +304,11 @@ export class DccWatcher extends EventEmitter {
 
   /** Path the scan cursor is written to. */
   private cursorFile(): string {
-    return this.config.cursorPath || './data/dcc-watcher-cursor.json';
+    // Namespaced by node: several validators sharing one data directory
+    // would otherwise share a cursor, and one node marking work done
+    // would stop the others from ever seeing it.
+    const node = this.config.nodeId || 'default';
+    return this.config.cursorPath || `./data/dcc-watcher-cursor-${node}.json`;
   }
 
   /** Last height fully scanned by a previous run, or null. */

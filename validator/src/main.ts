@@ -35,6 +35,7 @@ import {
 } from '@solana/web3.js';
 import * as fs from 'fs';
 import nacl from 'tweetnacl';
+import { dccIdToBytes32, unlockExpiration } from './utils/dcc-ids';
 import express from 'express';
 import {
   signAndBroadcastMint,
@@ -232,6 +233,7 @@ async function main(): Promise<void> {
 
   // ── Initialize Solana Watcher ──
   const solanaWatcher = new SolanaWatcher({
+    nodeId: config.nodeId,
     rpcUrl: config.solanaRpcUrl,
     wsUrl: config.solanaWsUrl,
     programId: config.solanaProgramId,
@@ -242,6 +244,7 @@ async function main(): Promise<void> {
 
   // ── Initialize DCC Watcher ──
   const dccWatcher = new DccWatcher({
+    nodeId: config.nodeId,
     nodeUrl: config.dccNodeUrl,
     bridgeContract: config.dccBridgeContract,
     requiredConfirmations: config.dccRequiredConfirmations,
@@ -786,16 +789,16 @@ async function submitUnlockToSolana(
   // Extract event data from the consensus result
   // The original DCC burn event is attached to attestations
   const burnEvent = (result as any).event as DccBurnEvent;
-  const transferIdBytes = Buffer.from(result.transferId, 'hex');
+  const transferIdBytes = dccIdToBytes32(result.transferId);
   const recipientPubkey = new PublicKey(burnEvent?.solRecipient || PublicKey.default.toBase58());
   // Event already has fee-adjusted amount (applied before consensus signing)
   const amount = BigInt(burnEvent?.amount || 0);
-  const burnTxHash = Buffer.from(burnEvent?.txId || '', 'hex');
+  const burnTxHash = dccIdToBytes32(burnEvent?.txId || '');
   // SECURITY FIX (CRIT-7): Use the SAME timestamp that was used during consensus signing.
   // Previously this used Date.now() which produces a different expiration than what
   // validators signed, causing Ed25519 verification to fail on-chain.
-  const requestTimestamp = (result as any).requestTimestamp || Date.now();
-  const expiration = Math.floor(requestTimestamp / 1000) + 3600;
+  // Must match what the validators signed: derived from the burn, not the clock.
+  const expiration = unlockExpiration(Number(burnEvent?.timestamp ?? 0));
 
   logger.info('Preparing unlock', {
     transferId: result.transferId,
