@@ -30,6 +30,7 @@ import {
   TransactionMessage,
   VersionedTransaction,
   Ed25519Program,
+  AddressLookupTableAccount,
   SystemProgram,
 } from '@solana/web3.js';
 import * as fs from 'fs';
@@ -897,11 +898,32 @@ async function submitUnlockToSolana(
   try {
     const { blockhash } = await connection.getLatestBlockhash('confirmed');
 
+    // An unlock carries ~13 account keys. At 32 bytes each the transaction
+    // measures ~1395 bytes with the three signatures min_validators demands,
+    // over Solana's 1232-byte limit, so it cannot be submitted at all. A lookup
+    // table drops the static accounts to 1 byte each and brings it to ~1116.
+    // Create one with scripts/create-unlock-lookup-table.ts.
+    const lookupTables: AddressLookupTableAccount[] = [];
+    const lookupTableAddress = process.env.UNLOCK_LOOKUP_TABLE;
+    if (lookupTableAddress) {
+      const fetched = await connection.getAddressLookupTable(new PublicKey(lookupTableAddress));
+      if (fetched.value) {
+        lookupTables.push(fetched.value);
+      } else {
+        logger.warn('UNLOCK_LOOKUP_TABLE is set but the table was not found', { lookupTableAddress });
+      }
+    } else {
+      logger.warn(
+        'UNLOCK_LOOKUP_TABLE is not set — with min_validators >= 3 the unlock ' +
+        'transaction exceeds the size limit and cannot be sent',
+      );
+    }
+
     const messageV0 = new TransactionMessage({
       payerKey: payer.publicKey,
       recentBlockhash: blockhash,
       instructions: [...ed25519Instructions, unlockIx],
-    }).compileToV0Message();
+    }).compileToV0Message(lookupTables);
 
     const tx = new VersionedTransaction(messageV0);
     tx.sign([payer]);
