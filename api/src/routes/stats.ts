@@ -54,20 +54,33 @@ statsRouter.get('/', async (_req: Request, res: Response) => {
     logger.warn('Failed to fetch Solana vault balance', { error: err.message });
   }
 
-  const totalMintedFormatted = (stats.totalMinted / 1e9).toFixed(9);
-  const totalBurnedFormatted = (stats.totalBurned / 1e9).toFixed(9);
-  const vaultFormatted = (vaultBalanceLamports / 1e9).toFixed(9);
-  const wsolSupply = ((stats.totalMinted - stats.totalBurned) / 1e9).toFixed(9);
+  // The DCC contract counts wSOL at 8 decimals; the Solana vault holds lamports
+  // at 9. Formatting wSOL with /1e9, or dividing lamports by a wSOL figure,
+  // understates supply and overstates backing by exactly 10x — a bridge holding
+  // a tenth of what it owes would have reported a healthy 1.0 here.
+  const WSOL_TO_LAMPORTS = 10;
+  const LAMPORTS_PER_SOL = 1e9;
+
+  const toSolFromWsol = (units: number) =>
+    ((units * WSOL_TO_LAMPORTS) / LAMPORTS_PER_SOL).toFixed(9);
+
+  const totalMintedFormatted = toSolFromWsol(stats.totalMinted);
+  const totalBurnedFormatted = toSolFromWsol(stats.totalBurned);
+  const vaultFormatted = (vaultBalanceLamports / LAMPORTS_PER_SOL).toFixed(9);
+  const wsolSupply = toSolFromWsol(stats.totalMinted - stats.totalBurned);
+
+  // Both sides in lamports before dividing.
+  const outstandingLamports = stats.outstanding * WSOL_TO_LAMPORTS;
   const collateralization =
-    stats.outstanding > 0
-      ? ((vaultBalanceLamports / stats.outstanding) * 1).toFixed(4)
+    outstandingLamports > 0
+      ? (vaultBalanceLamports / outstandingLamports).toFixed(4)
       : '1.0000';
 
   res.json({
     totalTransfers: stats.totalMinted > 0 || stats.totalBurned > 0 ? 'live' : 0,
     totalVolumeSol: totalMintedFormatted,
     totalBurnedSol: totalBurnedFormatted,
-    dailyMintedSol: (stats.dailyMinted / 1e9).toFixed(9),
+    dailyMintedSol: toSolFromWsol(stats.dailyMinted),
     activeValidators: stats.validatorCount,
     vaultBalance: vaultFormatted,
     wsolSupply,
