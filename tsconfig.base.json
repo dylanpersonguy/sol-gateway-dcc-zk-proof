@@ -14,8 +14,15 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "moduleResolution": "node",
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
+
+    // Deliberately off. @decentralchain/ts-types is imported by subpath, which
+    // resolves to its raw .ts sources rather than its shipped .d.ts, so these
+    // flags fail the build on unused locals inside a third-party package that
+    // skipLibCheck cannot skip. ESLint enforces the same rule where it belongs
+    // — on our own code, with `_` as the escape hatch — and CI runs it.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "strictNullChecks": true,

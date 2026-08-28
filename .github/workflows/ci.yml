@@ -75,11 +75,13 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
-      - name: Install Anchor
+      # Pinned: anchor resolves the required version from anchor-lang in the
+      # program Cargo.toml and refuses to build with any other one.
+      - name: Install Anchor 0.31.1
         run: |
           cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
-          avm install latest
-          avm use latest
+          avm install 0.31.1
+          avm use 0.31.1
 
       - name: Install node deps
         run: npm ci --no-audit --no-fund
