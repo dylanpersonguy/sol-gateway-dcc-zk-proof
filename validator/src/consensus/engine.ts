@@ -40,8 +40,18 @@ export interface ConsensusConfig {
   minValidatorsUnlock?: number;
   consensusTimeoutMs: number;
   maxRetries: number;
-  /** Chain id inside the signed mint message — the contract's dccChainId (2). */
+  /**
+   * Chain id inside the signed MINT message — the RIDE contract's own
+   * dccChainId, used for domain separation there. Currently 2.
+   */
   dccBridgeChainId: number;
+  /**
+   * Chain id inside the signed UNLOCK message — BridgeConfig.dcc_chain_id on
+   * the Solana program, which rejects anything else with ChainIdMismatch.
+   * Currently 63, the DecentralChain network id. Deliberately not the same
+   * number as dccBridgeChainId.
+   */
+  dccChainId: number;
   /** Path to persist processed transfer IDs (JSON file). Survives restarts. */
   processedTransfersPath?: string;
 }
@@ -567,7 +577,11 @@ export class ConsensusEngine extends EventEmitter {
 
     // DCC chain ID as u32 LE (default: 2)
     const dccChainIdBuf = Buffer.alloc(4);
-    dccChainIdBuf.writeUInt32LE(2);
+    // 63 here, not the RIDE contract's 2: the Solana program compares this
+    // against its own BridgeConfig.dcc_chain_id. Hardcoding 2 meant validators
+    // signed one chain id while the submission sent another, so the Ed25519
+    // precompile rejected every unlock.
+    dccChainIdBuf.writeUInt32LE(this.config.dccChainId);
     parts.push(dccChainIdBuf);
 
     // From the burn's on-chain timestamp, so every validator derives the same
