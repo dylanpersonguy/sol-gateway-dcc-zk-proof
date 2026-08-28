@@ -173,6 +173,8 @@ async function main(): Promise<void> {
     {
       nodeId: config.nodeId,
       minValidators: config.minValidators,
+      minValidatorsMint: config.minValidatorsMint,
+      minValidatorsUnlock: config.minValidatorsUnlock,
       dccBridgeChainId: config.dccBridgeChainId,
       consensusTimeoutMs: config.consensusTimeoutMs,
       maxRetries: config.maxRetries,
