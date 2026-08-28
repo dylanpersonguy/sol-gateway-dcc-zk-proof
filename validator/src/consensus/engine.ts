@@ -19,6 +19,7 @@ import { SolanaDepositEvent } from '../watchers/solana-watcher';
 import { DccBurnEvent } from '../watchers/dcc-watcher';
 import { verifySignature as dccVerifySignature } from '@decentralchain/ts-lib-crypto';
 import nacl from 'tweetnacl';
+import { dccIdToBytes32, unlockExpiration } from '../utils/dcc-ids';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -545,10 +546,8 @@ export class ConsensusEngine extends EventEmitter {
     parts.push(Buffer.from('SOL_DCC_BRIDGE_UNLOCK_V1'));
 
     // Transfer ID (32 bytes raw)
-    const transferIdBuf = Buffer.alloc(32);
-    const tidHex = Buffer.from(request.transferId, 'hex');
-    tidHex.copy(transferIdBuf, 0, 0, Math.min(32, tidHex.length));
-    parts.push(transferIdBuf);
+    // Base58, not hex: a DCC burn id parsed as hex decodes to nothing.
+    parts.push(dccIdToBytes32(request.transferId));
 
     // Recipient Solana pubkey (32 bytes raw) — from base58 to raw bytes
     const { PublicKey } = require('@solana/web3.js');
@@ -562,7 +561,7 @@ export class ConsensusEngine extends EventEmitter {
 
     // Burn TX hash (32 bytes raw)
     const burnTxBuf = Buffer.alloc(32);
-    const burnTxBytes = Buffer.from(event.txId, 'hex');
+    const burnTxBytes = dccIdToBytes32(event.txId);
     burnTxBytes.copy(burnTxBuf, 0, 0, Math.min(32, burnTxBytes.length));
     parts.push(burnTxBuf);
 
@@ -571,8 +570,9 @@ export class ConsensusEngine extends EventEmitter {
     dccChainIdBuf.writeUInt32LE(2);
     parts.push(dccChainIdBuf);
 
-    // Expiration as i64 LE (1 hour from request timestamp)
-    const expiration = Math.floor(request.timestamp / 1000) + 3600;
+    // From the burn's on-chain timestamp, so every validator derives the same
+    // value. Local time gave each node a different message to sign.
+    const expiration = unlockExpiration(event.timestamp);
     const expBuf = Buffer.alloc(8);
     expBuf.writeBigInt64LE(BigInt(expiration));
     parts.push(expBuf);
