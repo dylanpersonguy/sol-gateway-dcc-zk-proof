@@ -53,6 +53,7 @@ async function main(): Promise<void> {
   const detector = new AnomalyDetector(
     {
       maxSupplyDriftPercent: 0.001, // 0.1% tolerance
+      minFeePayerTransactions: parseInt(process.env.MIN_FEE_PAYER_TXS || '100', 10),
       maxHourlyVolume: BigInt(process.env.MAX_HOURLY_VOLUME || '500000000000'), // 500 SOL
       volumeSpikeMultiplier: 10,
       largeTransactionThreshold: BigInt(process.env.LARGE_TX_THRESHOLD || '50000000000'), // 50 SOL
@@ -115,6 +116,16 @@ async function main(): Promise<void> {
       await checkValidatorHealth(detector);
     } catch (err) {
       logger.error('Validator health check failed', { error: err });
+    }
+  });
+
+  // Every 5 minutes: fee payers. A validator that cannot pay a fee stops
+  // bridging silently — deposits keep locking and nothing mints.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await checkFeePayers(detector);
+    } catch (err) {
+      logger.error('Fee payer check failed', { error: err });
     }
   });
 
@@ -440,6 +451,48 @@ async function triggerEmergencyPause(alert: AnomalyAlert): Promise<void> {
 // ── Pause State Monitoring ──────────────────────────────────────────────────
 
 let lastPauseState: boolean | null = null;
+
+/**
+ * Balance of each chain's fee payer, expressed in transactions remaining.
+ *
+ * The DCC payer signs every mint; the Solana payer signs every unlock. Either
+ * running dry halts that direction of the bridge without surfacing an error.
+ */
+async function checkFeePayers(detector: AnomalyDetector): Promise<void> {
+  const DCC_FEE_PER_TX = 900_000n;      // 0.005 base + 0.004 dApp extraFee
+  const SOL_FEE_PER_TX = 10_000n;       // signature + a little headroom
+
+  // ── DCC mint payer ──
+  const dccSeed = process.env.DCC_VALIDATOR_SEED;
+  const dccNodeUrl = process.env.DCC_NODE_URL || 'https://mainnet-node.decentralchain.io';
+  if (dccSeed) {
+    try {
+      const { address } = await import('@decentralchain/ts-lib-crypto');
+      const dccAddress = address(dccSeed, parseInt(process.env.DCC_CHAIN_ID || '63', 10));
+      const { data } = await axios.get(`${dccNodeUrl}/addresses/balance/${dccAddress}`, { timeout: 10000 });
+      detector.checkFeePayerBalance('dcc', BigInt(data.balance ?? 0), DCC_FEE_PER_TX, dccAddress);
+    } catch (err: any) {
+      logger.warn('Could not read the DCC fee payer balance', { error: err.message });
+    }
+  }
+
+  // ── Solana unlock payer ──
+  const payerPath = process.env.SOLANA_PAYER_KEYPAIR_PATH;
+  if (payerPath) {
+    try {
+      const fs = await import('fs');
+      const { Keypair } = await import('@solana/web3.js');
+      const resolved = payerPath.startsWith('.')
+        ? path.resolve(__dirname, '../../validator', payerPath)
+        : payerPath;
+      const kp = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(resolved, 'utf-8'))));
+      const balance = await solanaConnection.getBalance(kp.publicKey);
+      detector.checkFeePayerBalance('solana', BigInt(balance), SOL_FEE_PER_TX, kp.publicKey.toBase58());
+    } catch (err: any) {
+      logger.warn('Could not read the Solana fee payer balance', { error: err.message });
+    }
+  }
+}
 
 async function checkPauseState(detector: AnomalyDetector): Promise<void> {
   try {
