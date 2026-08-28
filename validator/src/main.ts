@@ -123,11 +123,20 @@ async function main(): Promise<void> {
     publicKey: signer.getPublicKey().toString('hex'),
   });
 
-  // ── Derive DCC signing seed for this validator ──
-  // Each validator gets a unique signing key derived from the base DCC seed
-  // and its node ID. These keys match the Curve25519 signature scheme used
-  // by RIDE's sigVerify(), as opposed to Ed25519 (tweetnacl).
-  const dccSigningSeed = `${config.dccSeed}:bridge-signer:${config.nodeId}`;
+  // ── DCC attestation signing key ──
+  // This validator's own seed. Its public key must be registered on the bridge
+  // contract: committeeMint calls isValidatorActive() on every pubkey it is
+  // handed and throws "Validator not active" on the first one that is not.
+  //
+  // Previously this derived a per-node key as `${seed}:bridge-signer:${nodeId}`,
+  // which no node's registered key matched, so every mint was rejected on-chain.
+  // Deriving siblings from one master seed also cannot produce a real committee:
+  // every derived key is recoverable from that single secret, so an M-of-N built
+  // from them is M-of-one wearing a committee's clothes.
+  //
+  // A genuine committee needs each validator to hold an INDEPENDENT seed, set
+  // per node via DCC_SIGNING_SEED, with each public key registered on-chain.
+  const dccSigningSeed = process.env.DCC_SIGNING_SEED || config.dccSeed;
   const dccSigningPubKeyB58 = dccPublicKey(dccSigningSeed);
   const dccSigningPubKeyRaw = Buffer.from(dccBase58Decode(dccSigningPubKeyB58));
 
@@ -571,17 +580,12 @@ async function submitMintToDcc(
   const signatures = result.attestations.map((a: Attestation) => a.signature.toString('base64'));
   const pubkeys = result.attestations.map((a: Attestation) => a.publicKey.toString('base64'));
 
-  // The on-chain committee has approval_threshold: 2 but the validator runs as a single node.
-  // Supplement with validator-2's DCC Curve25519 signature so the threshold is met.
-  // All committee keys (validator-1, -2, -3) are derived from the same master DCC seed.
-  const canonicalMsg = result.attestations[0]?.messageHash;
-  if (canonicalMsg && signatures.length < 2) {
-    const v2Seed   = `${config.dccSeed}:bridge-signer:validator-2`;
-    const v2PubB58 = dccPublicKey(v2Seed);
-    const v2SigB58 = dccSignBytes(v2Seed, new Uint8Array(canonicalMsg)) as unknown as string;
-    signatures.push(Buffer.from(dccBase58Decode(v2SigB58)).toString('base64'));
-    pubkeys.push(Buffer.from(dccBase58Decode(v2PubB58)).toString('base64'));
-  }
+  // A second signature is NOT synthesised here to reach the threshold.
+  // Signing the same message again with a sibling key derived from this
+  // validator's own seed would present one signer as two — the exact attack
+  // the contract's duplicate-pubkey check (CRIT-5) exists to stop — and that
+  // key is not registered, so committeeMint would throw "Validator not active"
+  // regardless. If the threshold is not met, the mint should not proceed.
 
   logger.info('Submitting mint to DCC', {
     transferId: result.transferId,
