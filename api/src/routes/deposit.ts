@@ -9,7 +9,7 @@ import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, ASSOCIATED_TOKEN_PROGR
 import bs58 from 'bs58';
 import { createLogger } from '../utils/logger';
 import { readBridgeConfig, lamportsToSol } from '../utils/bridge-config';
-import { isValidDccAddress, getDccConfig, getBridgeStats } from '../utils/dcc-helpers';
+import { isValidDccAddress, getDccConfig, getBridgeStats, isDccContractDeployed } from '../utils/dcc-helpers';
 
 const logger = createLogger('DepositRoute');
 
@@ -225,6 +225,24 @@ depositRouter.post('/spl', async (req: Request, res: Response, next: NextFunctio
     }
 
     const { sender, recipientDcc, amount, splMint } = parsed.data;
+
+    // The validator routes every USDC/USDT deposit to the DUSD contract
+    // (validator/src/main.ts) and returns — there is no fallback to a normal
+    // bridge mint. If that contract is not deployed the deposit locks the
+    // user's tokens on Solana with nothing able to mint them back.
+    const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    const USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+    if (splMint === USDC_MINT || splMint === USDT_MINT) {
+      const dccCfg = getDccConfig();
+      const dusdContract = process.env.DCC_DUSD_CONTRACT || '';
+      if (!(await isDccContractDeployed(dusdContract, dccCfg.nodeUrl))) {
+        logger.error('Refusing USDC/USDT deposit — DUSD contract not deployed', { dusdContract });
+        return res.status(503).json({
+          error: 'USDC and USDT deposits are unavailable: the DecentralChain contract that mints them is not deployed. Your funds have not been touched.',
+          contract: dusdContract,
+        });
+      }
+    }
 
     logger.info('SPL deposit request', { sender, recipientDcc, amount, splMint });
 

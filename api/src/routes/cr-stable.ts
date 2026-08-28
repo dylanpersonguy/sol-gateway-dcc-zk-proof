@@ -10,6 +10,7 @@
 import { Router, Request, Response } from 'express';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { createLogger } from '../utils/logger';
+import { isDccContractDeployed, getDccConfig } from '../utils/dcc-helpers';
 
 const logger = createLogger('CR-Stable');
 
@@ -35,6 +36,18 @@ const CR_MINT_MINIMUM = 1; // $1 minimum
  */
 crStableRouter.post('/mint', async (req: Request, res: Response) => {
   try {
+    // A deposit for a contract that is not deployed locks the user's funds on
+    // Solana with nothing able to mint them on DecentralChain. Refuse first.
+    const dccCfg = getDccConfig();
+    const targetContract = process.env.DCC_DUSD_CONTRACT || '';
+    if (!(await isDccContractDeployed(targetContract, dccCfg.nodeUrl))) {
+      logger.error('Refusing mint — DCC contract is not deployed', { targetContract });
+      return res.status(503).json({
+        error: 'Minting is unavailable: the DecentralChain contract for this token is not deployed. Your funds have not been touched.',
+        contract: targetContract,
+      });
+    }
+
     const { sender, recipientDcc, amount, splMint } = req.body;
 
     // Validate required fields
@@ -122,6 +135,12 @@ crStableRouter.post('/mint', async (req: Request, res: Response) => {
  * Return CR Stable token info and reserve status.
  */
 crStableRouter.get('/info', async (_req: Request, res: Response) => {
+    // Surfaced so the UI can hide a token whose contract is not deployed
+    // rather than let someone start a deposit that can never mint.
+    const dccCfg = getDccConfig();
+    const contract = process.env.DCC_DUSD_CONTRACT || '';
+    const available = await isDccContractDeployed(contract, dccCfg.nodeUrl);
+
   try {
     const connection = new Connection(SOLANA_RPC, 'confirmed');
     const vaultPubkey = new PublicKey(VAULT_ADDRESS);
@@ -136,6 +155,8 @@ crStableRouter.get('/info', async (_req: Request, res: Response) => {
     }
 
     return res.json({
+      available,
+      contract,
       symbol: 'CRS',
       name: 'CR Stable',
       fullName: 'Stable CR Coin',

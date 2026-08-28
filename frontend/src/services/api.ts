@@ -85,6 +85,16 @@ class BridgeApi {
     return data;
   }
 
+  /**
+   * Token metadata for a mintable token (DUSD, CR Stable).
+   * `available` is false when that token's DCC contract is not deployed, in
+   * which case its mint form must not be shown.
+   */
+  async getTokenInfo(path: string) {
+    const { data } = await this.client.get(path);
+    return data as { available?: boolean; contract?: string; [k: string]: any };
+  }
+
   async getFees() {
     const { data } = await this.client.get('/fees');
     return data;

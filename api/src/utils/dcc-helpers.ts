@@ -2,6 +2,7 @@
 // DCC HELPERS — API-side utilities for DecentralChain interaction
 // ═══════════════════════════════════════════════════════════════
 
+import axios from 'axios';
 import {
   nodeInteraction,
   waitForTx,
@@ -66,6 +67,48 @@ export async function getDccAccountDataByKey(
 /**
  * Get bridge stats from the DCC contract's data storage
  */
+// ── dApp deployment check ────────────────────────────────────
+
+/** Cached results — a contract does not get deployed or removed often. */
+const scriptCache = new Map<string, { deployed: boolean; checkedAt: number }>();
+const SCRIPT_CACHE_TTL_MS = 60_000;
+
+/**
+ * Whether a DCC address actually has a dApp script deployed.
+ *
+ * Handing out a deposit instruction for a contract that does not exist locks
+ * the user's funds on Solana and then fails to mint on DecentralChain, so any
+ * route that mints through a configured contract must check this first.
+ *
+ * Fails CLOSED: if the node cannot be reached we report "not deployed" rather
+ * than let a mint proceed on an unverified contract.
+ */
+export async function isDccContractDeployed(
+  address: string,
+  nodeUrl: string,
+): Promise<boolean> {
+  if (!address) return false;
+
+  const cached = scriptCache.get(address);
+  if (cached && Date.now() - cached.checkedAt < SCRIPT_CACHE_TTL_MS) {
+    return cached.deployed;
+  }
+
+  let deployed = false;
+  try {
+    const res = await axios.get(
+      `${nodeUrl}/addresses/scriptInfo/${address}`,
+      { timeout: 10_000 },
+    );
+    deployed = Boolean(res.data?.script) && Number(res.data?.complexity ?? 0) > 0;
+  } catch {
+    deployed = false;
+  }
+
+  scriptCache.set(address, { deployed, checkedAt: Date.now() });
+  return deployed;
+}
+
 export async function getBridgeStats(
   contractAddress: string,
   nodeUrl: string,

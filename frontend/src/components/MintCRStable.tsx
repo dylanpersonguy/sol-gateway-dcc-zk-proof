@@ -11,6 +11,7 @@ import { RedeemCRStable } from './RedeemCRStable';
 import { TransferProgress } from './TransferProgress';
 
 const MINT_CONFIG = {
+  infoPath: '/cr-stable/info',
   sourceTokens: MINT_SOURCE_TOKENS,
   targetToken: CR_STABLE,
   feeRate: CR_MINT_FEE_RATE,
@@ -24,6 +25,32 @@ export function MintCRStable() {
 
   if (mint.activeTransfer) {
     return <TransferProgress />;
+  }
+
+  // Depositing against a contract that is not deployed would lock funds on
+  // Solana that nothing can mint back. Never show the form until confirmed.
+  if (mint.available === false) {
+    return (
+      <div className="card">
+        <h2 className="text-xl font-semibold text-white mb-2">Temporarily unavailable</h2>
+        <p className="text-gray-400 text-sm">
+          Minting is disabled because the DecentralChain contract for this token is
+          not currently deployed. Depositing now would lock your funds without
+          issuing any tokens.
+        </p>
+        <p className="text-gray-500 text-xs mt-3">
+          Bridging SOL and the other supported tokens is unaffected.
+        </p>
+      </div>
+    );
+  }
+
+  if (mint.available === null) {
+    return (
+      <div className="card">
+        <p className="text-gray-400 text-sm">Checking availability…</p>
+      </div>
+    );
   }
 
   if (mode === 'redeem') {
