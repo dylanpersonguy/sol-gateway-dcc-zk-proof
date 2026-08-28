@@ -159,3 +159,31 @@ describe('On-chain format contracts — DepositRecord layout', () => {
     }
   });
 });
+
+describe('On-chain format contracts — callable names', () => {
+  /** Every dApp function the validator invokes, and the contract it targets. */
+  const CALLS: Array<{ file: string; contract: string; source: string }> = [
+    { file: 'validator/src/utils/dcc-helpers.ts', contract: 'bridge', source: RIDE },
+  ];
+
+  it('every function the validator invokes exists in the contract', () => {
+    for (const { file, source } of CALLS) {
+      const code = fs.readFileSync(path.join(ROOT, file), 'utf-8');
+      const called = [...code.matchAll(/function:\s*'([A-Za-z_][A-Za-z0-9_]*)'/g)].map((m) => m[1]);
+      expect(called.length, `no dApp calls found in ${file}`).to.be.greaterThan(0);
+
+      for (const fn of called) {
+        const declared = new RegExp(`func\\s+${fn}\\s*\\(`).test(source);
+        expect(declared, `${file} invokes "${fn}", which the contract does not define`).to.equal(true);
+      }
+    }
+  });
+
+  it('the bridge contract defines mint, not committeeMint', () => {
+    // The validator called committeeMint for its whole history. Consensus
+    // succeeded and every submission then failed on a function that does not
+    // exist, which is why no mint ever came from the validators.
+    expect(/func\s+mint\s*\(/.test(RIDE)).to.equal(true);
+    expect(/func\s+committeeMint\s*\(/.test(RIDE)).to.equal(false);
+  });
+});

@@ -115,14 +115,18 @@ export async function signAndBroadcastMint(params: {
   nodeUrl: string;
   seed: string;
 }): Promise<{ id: string }> {
-  // Build the invokeScript transaction matching the RIDE contract's committeeMint function:
-  //   func committeeMint(transferId: String, recipient: String, amount: Int, solSlot: Int,
-  //                      signatures: List[ByteVector], pubkeys: List[ByteVector])
+  // Matches the RIDE contract's mint function:
+  //   func mint(transferId: String, recipient: String, amount: Int, solSlot: Int,
+  //             signatures: List[ByteVector], pubkeys: List[ByteVector])
+  //
+  // This called 'committeeMint', which the deployed contract does not define —
+  // every submission failed with "Cannot find callable function committeeMint"
+  // after consensus had already succeeded. The argument list was always correct.
   const signedTx = invokeScript(
     {
       dApp: params.dApp,
       call: {
-        function: 'committeeMint',
+        function: 'mint',
         args: [
           { type: 'string', value: params.transferId },
           { type: 'string', value: params.recipient },
