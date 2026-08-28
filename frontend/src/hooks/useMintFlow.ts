@@ -35,6 +35,8 @@ export interface MintFlowConfig {
   feeRate: number;
   feeDisplay: string;
   minimum: number;
+  /** API path reporting whether this token's DCC contract is deployed. */
+  infoPath: string;
 }
 
 export function useMintFlow(config: MintFlowConfig) {
@@ -43,6 +45,20 @@ export function useMintFlow(config: MintFlowConfig) {
   const publicKey = getPublicKey(adapterPubkey);
   const signTransaction = getSignTransaction(adapterSign ?? null);
   const { connection } = useConnection();
+
+  // Whether the DCC contract backing this token is actually deployed. A deposit
+  // for a contract that does not exist locks funds on Solana that nothing can
+  // mint, so the form stays hidden until the API confirms it. null = checking.
+  const [available, setAvailable] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    bridgeApi
+      .getTokenInfo(config.infoPath)
+      .then((info) => { if (!cancelled) setAvailable(info?.available !== false); })
+      .catch(() => { if (!cancelled) setAvailable(false); });
+    return () => { cancelled = true; };
+  }, [config.infoPath]);
   const { setActiveTransfer, activeTransfer, updateTransferStatus } = useBridgeStore();
 
   const [selectedSource, setSelectedSource] = useState<MintableToken>(config.sourceTokens[0]);
@@ -331,6 +347,7 @@ export function useMintFlow(config: MintFlowConfig) {
   };
 
   return {
+    available,
     selectedSource,
     setSelectedSource: (t: MintableToken) => { setSelectedSource(t); setSolQuote(null); },
     amount,
