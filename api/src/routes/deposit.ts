@@ -8,6 +8,7 @@ import { Connection, PublicKey, SystemProgram } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import bs58 from 'bs58';
 import { createLogger } from '../utils/logger';
+import { estimatedMintTime } from '../utils/timing';
 import { readBridgeConfig, lamportsToSol } from '../utils/bridge-config';
 import { isValidDccAddress, getDccConfig, getBridgeStats, isDccContractDeployed } from '../utils/dcc-helpers';
 
@@ -195,7 +196,7 @@ depositRouter.get('/limits', async (_req: Request, res: Response, next: NextFunc
       maxDailyVolume,
       currentDailyVolume,
       bridgeStatus,
-      estimatedMintTime: '2-5 minutes',
+      estimatedMintTime: estimatedMintTime(),
       solanaConfirmations: 32,
     });
   } catch (err) {

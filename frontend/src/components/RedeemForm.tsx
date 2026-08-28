@@ -197,7 +197,10 @@ export function RedeemForm() {
 
         <div className="flex justify-between text-sm">
           <span className="text-gray-400">Estimated time</span>
-          <span>{feeQuote.path === 'zk' ? '5–10 minutes' : '3–5 minutes'}</span>
+          {/* DCC finality dominates a redemption: DCC_CONFIRMATIONS key blocks
+              at ~60s each. The API reports the same figure from the same
+              setting via /redeem/limits. */}
+          <span>{feeQuote.path === 'zk' ? '~5-7 minutes' : '~3-5 minutes'}</span>
         </div>
       </div>
 
