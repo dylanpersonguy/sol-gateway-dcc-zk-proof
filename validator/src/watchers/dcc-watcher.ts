@@ -10,10 +10,16 @@ import axios, { AxiosInstance } from 'axios';
 import { Logger } from 'winston';
 import { createLogger } from '../utils/logger';
 
+/** wSOL is 8dp on DecentralChain, SOL is 9dp on Solana. */
+const WSOL_TO_LAMPORTS_DIVISOR = 10n;
+
 export interface DccBurnEvent {
   burnId: string;
   sender: string;
   solRecipient: string;
+  /** SPL mint the burn is redeeming, as recorded by the contract. */
+  splMint: string;
+  /** Lamports (9dp) — converted from the record's wSOL units. */
   amount: bigint;
   height: number;
   timestamp: number;
@@ -186,25 +192,46 @@ export class DccWatcher extends EventEmitter {
       const stateChanges = tx.stateChanges;
       if (!stateChanges) return null;
 
-      // Find the burn record in data entries
+      // The burn record, not burn_nonce_<address>, which shares the prefix and
+      // would otherwise match first depending on how the node orders entries.
       const burnRecordEntry = stateChanges.data?.find(
-        (entry: any) => entry.key.startsWith('burn_')
+        (entry: any) =>
+          typeof entry.key === 'string' &&
+          entry.key.startsWith('burn_') &&
+          !entry.key.startsWith('burn_nonce_') &&
+          typeof entry.value === 'string',
       );
       if (!burnRecordEntry) return null;
 
-      // Parse burn record: "sender|solRecipient|amount|height|timestamp"
+      // The contract writes SIX fields (see keyBurnRecord in bridge_controller.ride):
+      //   caller | solRecipient | splMint | amount | height | timestamp
+      // This previously read five, taking splMint as the amount, so
+      // BigInt(parts[2]) threw on a base58 mint and the catch below discarded
+      // every burn. Redemption never started.
       const parts = burnRecordEntry.value.split('|');
-      if (parts.length < 5) return null;
+      if (parts.length < 6) {
+        this.logger.warn('Burn record has an unexpected shape', {
+          key: burnRecordEntry.key,
+          fields: parts.length,
+        });
+        return null;
+      }
 
       const burnId = burnRecordEntry.key.replace('burn_', '');
+
+      // The record holds wSOL units (8dp). Unlock releases lamports (9dp), so
+      // convert — mirrors token_<mint>_divisor on the bridge contract.
+      const amountWsolUnits = BigInt(parts[3]);
+      const amountLamports = amountWsolUnits * WSOL_TO_LAMPORTS_DIVISOR;
 
       return {
         burnId,
         sender: parts[0],
         solRecipient: parts[1],
-        amount: BigInt(parts[2]),
-        height: parseInt(parts[3]),
-        timestamp: parseInt(parts[4]),
+        splMint: parts[2],
+        amount: amountLamports,
+        height: parseInt(parts[4]),
+        timestamp: parseInt(parts[5]),
         txId: tx.id,
         confirmations: 0,
       };
