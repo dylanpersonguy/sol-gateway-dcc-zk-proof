@@ -13,6 +13,9 @@ import { createLogger } from '../utils/logger';
 /** wSOL is 8dp on DecentralChain, SOL is 9dp on Solana. */
 const WSOL_TO_LAMPORTS_DIVISOR = 10n;
 
+/** Blocks to stay behind the tip so only settled blocks are scanned. */
+const SCAN_LAG_BLOCKS = 1;
+
 export interface DccBurnEvent {
   burnId: string;
   sender: string;
@@ -119,12 +122,21 @@ export class DccWatcher extends EventEmitter {
       try {
         const currentHeight = await this.getCurrentHeight();
 
-        if (currentHeight > this.lastProcessedHeight) {
-          // Scan new blocks for burn events
-          for (let h = this.lastProcessedHeight + 1; h <= currentHeight; h++) {
-            await this.scanBlock(h);
+        // Stop short of the tip. A block at the current height is still being
+        // formed and comes back with zero transactions; scanning it and then
+        // advancing past it loses whatever lands in it moments later — which is
+        // exactly how a burn goes missing with no error anywhere.
+        const safeHeight = currentHeight - SCAN_LAG_BLOCKS;
+
+        if (safeHeight > this.lastProcessedHeight) {
+          for (let h = this.lastProcessedHeight + 1; h <= safeHeight; h++) {
+            // Advance one block at a time, and only past blocks actually read.
+            // A failed fetch used to be swallowed while the cursor moved on, so
+            // the block was never revisited.
+            const scanned = await this.scanBlock(h);
+            if (!scanned) break;
+            this.lastProcessedHeight = h;
           }
-          this.lastProcessedHeight = currentHeight;
         }
       } catch (err) {
         this.logger.error('Poll loop error', { error: err });
@@ -137,18 +149,25 @@ export class DccWatcher extends EventEmitter {
   /**
    * Scan a specific block for burn transactions on the bridge contract
    */
-  private async scanBlock(height: number): Promise<void> {
+  /** Returns false if the block could not be read, so it is retried. */
+  private async scanBlock(height: number): Promise<boolean> {
     try {
       const response = await this.client.get(`/blocks/at/${height}`);
       const block = response.data;
 
-      if (!block || !block.transactions) return;
+      if (!block || !block.transactions) return false;
 
       for (const tx of block.transactions) {
         await this.checkForBurnEvent(tx, height);
       }
-    } catch (err) {
-      this.logger.debug('Failed to scan block', { height, error: err });
+      return true;
+    } catch (err: any) {
+      // Warn, not debug: a block silently skipped is a burn silently lost.
+      this.logger.warn('Failed to scan block — will retry', {
+        height,
+        error: err?.message ?? err,
+      });
+      return false;
     }
   }
 
