@@ -162,8 +162,22 @@ export class DccWatcher extends EventEmitter {
       if (tx.dApp !== this.config.bridgeContract) return;
       if (tx.call?.function !== 'burn' && tx.call?.function !== 'burnToken') return;
 
-      // Parse burn event from state changes
-      const burnEvent = await this.parseBurnEvent(tx, height);
+      // Block transactions carry no stateChanges — /blocks/at/{h} returns only
+      // the transaction envelope, and the burn record lives in the state the
+      // invocation wrote. Fetching it by id is what makes the record visible;
+      // without this every burn was dropped here, before parsing even began.
+      let full = tx;
+      if (!tx.stateChanges) {
+        try {
+          const detail = await this.client.get(`/transactions/info/${tx.id}`);
+          full = detail.data;
+        } catch (err) {
+          this.logger.warn('Could not fetch burn transaction detail', { txId: tx.id, error: err });
+          return;
+        }
+      }
+
+      const burnEvent = await this.parseBurnEvent(full, height);
       if (!burnEvent) return;
 
       if (this.pendingBurns.has(burnEvent.burnId)) {
