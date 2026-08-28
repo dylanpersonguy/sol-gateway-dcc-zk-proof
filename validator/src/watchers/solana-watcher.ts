@@ -9,6 +9,7 @@
 // - Submit verified events to consensus layer
 // - Detect reorgs and invalidate affected events
 
+import * as fs from 'fs';
 import { Connection, PublicKey, Commitment, Context } from '@solana/web3.js';
 import { EventEmitter } from 'events';
 import { Logger } from 'winston';
@@ -34,6 +35,8 @@ export interface SolanaDepositEvent {
 }
 
 export interface SolanaWatcherConfig {
+  /** Where the poll cursor is persisted so a restart resumes rather than skips. */
+  cursorPath?: string;
   rpcUrl: string;
   wsUrl: string;
   programId: string;
@@ -170,9 +173,21 @@ export class SolanaWatcher extends EventEmitter {
         { limit: 1 },
         'confirmed'
       );
-      if (recent.length > 0) {
+      const resumed = this.loadCursor();
+      if (resumed) {
+        // Pick up where the last run stopped. Seeding from the newest signature
+        // instead silently drops every deposit that landed while this validator
+        // was down: the SOL is locked and nothing will ever mint against it.
+        this.lastSeenSignature = resumed.signature;
+        this.lastProcessedSlot = resumed.slot ?? 0;
+        this.logger.info('Resuming polling from persisted signature', {
+          signature: resumed.signature.slice(0, 16) + '...',
+          slot: resumed.slot,
+        });
+      } else if (recent.length > 0) {
         this.lastSeenSignature = recent[0].signature;
         this.lastProcessedSlot = recent[0].slot;
+        this.saveCursor();
         this.logger.info('Polling seeded from latest signature', {
           signature: this.lastSeenSignature.slice(0, 16) + '...',
           slot: recent[0].slot,
@@ -196,6 +211,44 @@ export class SolanaWatcher extends EventEmitter {
    * Fetch new confirmed signatures for the bridge program since our last cursor,
    * then fetch each transaction's logs and parse deposit events.
    */
+  /** Where the poll cursor is persisted so a restart resumes rather than skips. */
+  private cursorFile(): string {
+    return this.config.cursorPath || './data/solana-watcher-cursor.json';
+  }
+
+  /** Signature and slot last fully processed by a previous run. */
+  private loadCursor(): { signature: string; slot?: number } | null {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.cursorFile(), 'utf-8'));
+      return typeof parsed?.signature === 'string'
+        ? { signature: parsed.signature, slot: Number(parsed.slot) || undefined }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private saveCursor(): void {
+    try {
+      const file = this.cursorFile();
+      const dir = file.substring(0, file.lastIndexOf('/'));
+      if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({
+        signature: this.lastSeenSignature,
+        slot: this.lastProcessedSlot,
+        updatedAt: Date.now(),
+      }));
+    } catch (err: any) {
+      this.logger.warn('Could not persist the poll cursor', { error: err?.message });
+    }
+  }
+
+  /** Move past one handled transaction and record it. */
+  private advanceCursor(signature: string): void {
+    this.lastSeenSignature = signature;
+    this.saveCursor();
+  }
+
   private async pollNewTransactions(): Promise<void> {
     const opts: any = { limit: 50 };
     if (this.lastSeenSignature) {
@@ -216,8 +269,16 @@ export class SolanaWatcher extends EventEmitter {
 
     this.logger.debug('Poll found new transactions', { count: chronological.length });
 
+    // Advance one transaction at a time and only past ones actually handled.
+    // Jumping the cursor to the newest signature regardless meant a single
+    // failed fetch skipped that deposit permanently — the same way the DCC
+    // watcher used to skip blocks.
     for (const sigInfo of chronological) {
-      if (sigInfo.err) continue; // Skip failed txs
+      if (sigInfo.err) {
+        // A failed transaction deposits nothing, so it is safe to move past.
+        this.advanceCursor(sigInfo.signature);
+        continue;
+      }
 
       try {
         const tx = await this.connection.getTransaction(sigInfo.signature, {
@@ -225,9 +286,11 @@ export class SolanaWatcher extends EventEmitter {
           maxSupportedTransactionVersion: 0,
         });
 
-        if (!tx || !tx.meta?.logMessages) continue;
+        if (!tx || !tx.meta?.logMessages) {
+          this.advanceCursor(sigInfo.signature);
+          continue;
+        }
 
-        // Build a logs object compatible with processLogs
         const logsObj = {
           signature: sigInfo.signature,
           logs: tx.meta.logMessages,
@@ -236,16 +299,16 @@ export class SolanaWatcher extends EventEmitter {
 
         const ctx: Context = { slot: tx.slot };
         await this.processLogs(logsObj, ctx);
-      } catch (err) {
-        this.logger.debug('Failed to fetch/parse tx during polling', {
+        this.advanceCursor(sigInfo.signature);
+      } catch (err: any) {
+        // Hold the cursor here so the next poll retries this transaction.
+        this.logger.warn('Failed to fetch or parse a transaction — will retry', {
           signature: sigInfo.signature,
-          error: err,
+          error: err?.message ?? err,
         });
+        return;
       }
     }
-
-    // Advance cursor to the newest signature we've seen
-    this.lastSeenSignature = signatures[0].signature;
   }
 
   /**
