@@ -21,4 +21,7 @@ ENV PORT=3000
 # Overridable so the image also runs outside a compose network.
 ENV API_UPSTREAM=http://api:3000
 ENV DNS_RESOLVER=127.0.0.11
+# Docker compose default. Railway's private network is IPv6-only — set
+# RESOLVER_IPV6=on and point DNS_RESOLVER at its resolver there.
+ENV RESOLVER_IPV6=off
 EXPOSE 3000
