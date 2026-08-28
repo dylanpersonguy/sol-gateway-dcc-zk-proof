@@ -27,6 +27,12 @@ export interface ValidatorConfig {
   dccChainId: number;
   dccChainIdChar: string;   // '?' for mainnet (produces 3D... addresses)
   dccSeed: string;           // Validator's DCC seed phrase for signing mints
+  /**
+   * Chain identifier baked into the signed mint message for domain separation
+   * (`let dccChainId = 2` in the RIDE contract). NOT dccChainId/DCC_CHAIN_ID=63,
+   * which is the network address byte.
+   */
+  dccBridgeChainId: number;
   wsolAssetId: string;       // SOL.DCC asset ID on DecentralChain
 
   // ── Consensus ──
@@ -132,6 +138,7 @@ function parseDccConfig() {
     dccChainId: envInt('DCC_CHAIN_ID', 63),
     dccChainIdChar: envStr('DCC_CHAIN_ID_CHAR', '?'),
     dccSeed: requireEnv('DCC_VALIDATOR_SEED'),
+    dccBridgeChainId: parseInt(envStr('DCC_BRIDGE_CHAIN_ID', '2'), 10),
     wsolAssetId: process.env.SOL_ASSET_ID || process.env.WSOL_ASSET_ID || requireEnv('SOL_ASSET_ID'),
     dccRequiredConfirmations: envInt('DCC_CONFIRMATIONS', 10),
   };
