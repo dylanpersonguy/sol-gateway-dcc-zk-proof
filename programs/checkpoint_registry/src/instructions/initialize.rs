@@ -57,7 +57,7 @@ pub fn handler(ctx: Context<Initialize>, params: InitializeParams) -> Result<()>
     config.solana_chain_id = params.solana_chain_id;
     config.dcc_chain_id = params.dcc_chain_id;
     config.bump = ctx.bumps.config;
-    config._reserved = [0u8; 64];
+    config._reserved = [0u8; 56];
 
     msg!("Checkpoint registry initialized");
     Ok(())

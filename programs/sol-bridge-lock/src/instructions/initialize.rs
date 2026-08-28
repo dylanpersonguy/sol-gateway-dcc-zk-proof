@@ -95,7 +95,7 @@ pub fn handler(ctx: Context<Initialize>, params: InitializeParams) -> Result<()>
     config.vault_bump = ctx.bumps.vault;
     config.resume_requested_at = 0;
     config.resume_delay_seconds = params.resume_delay_seconds;
-    config._reserved = [0u8; 112];
+    config._reserved = [0u8; 72];
 
     msg!("Bridge initialized. Authority: {}", config.authority);
     Ok(())

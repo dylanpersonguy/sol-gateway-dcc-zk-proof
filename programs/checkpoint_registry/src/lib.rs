@@ -6,7 +6,7 @@ pub mod instructions;
 use anchor_lang::prelude::*;
 use instructions::*;
 
-declare_id!("G9NL1r3B7Dzuxsct3nSYrcW3PySeBpNivcDmKH2fWRW6");
+declare_id!("26xPyXG6C3E8zDW6te9FUZFQX6YRKe4DYzxE3BJUJLnY");
 
 /// Checkpoint Registry Program
 ///
