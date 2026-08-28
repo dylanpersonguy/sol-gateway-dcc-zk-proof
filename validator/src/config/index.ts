@@ -10,6 +10,8 @@ export interface ValidatorConfig {
   // ── Node Identity ──
   nodeId: string;
   privateKeyPath: string;
+  /** Solana keypair (JSON array) that pays for unlock transactions. */
+  solanaPayerKeypairPath: string;
 
   // ── Solana Connection ──
   solanaRpcUrl: string;
@@ -200,6 +202,7 @@ export function loadConfig(): ValidatorConfig {
   return {
     nodeId: requireEnv('VALIDATOR_NODE_ID'),
     privateKeyPath: requireEnv('VALIDATOR_PRIVATE_KEY_PATH'),
+    solanaPayerKeypairPath: envStr('SOLANA_PAYER_KEYPAIR_PATH', './data/keys/solana-payer.json'),
     ...parseSolanaConfig(),
     ...parseDccConfig(),
     ...parseConsensusConfig(),

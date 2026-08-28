@@ -730,9 +730,24 @@ async function submitUnlockToSolana(
     signatures: result.attestations.length,
   });
 
-  // Load the payer keypair (validator's Solana keypair)
-  const keypairData = JSON.parse(fs.readFileSync(config.privateKeyPath, 'utf-8'));
-  const payer = Keypair.fromSecretKey(Uint8Array.from(keypairData));
+  // Load the Solana fee payer.
+  //
+  // This used to read config.privateKeyPath, which is the AES-GCM encrypted
+  // attestation signing key, not a keypair file — JSON.parse threw on the
+  // ciphertext, so unlocking could never get as far as building a transaction.
+  // The Solana payer is a separate keypair with its own path and its own SOL.
+  let payer: Keypair;
+  try {
+    const raw = fs.readFileSync(config.solanaPayerKeypairPath, 'utf-8');
+    payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)));
+  } catch (err: any) {
+    throw new Error(
+      `Cannot load the Solana unlock payer from ${config.solanaPayerKeypairPath}: ` +
+      `${err?.message}. It must be a Solana keypair JSON array (as produced by ` +
+      `\`solana-keygen new\`), funded with SOL to pay unlock fees. Set ` +
+      'SOLANA_PAYER_KEYPAIR_PATH to point at it.',
+    );
+  }
 
   const connection = new Connection(config.solanaRpcUrl, 'confirmed');
   const programId = new PublicKey(config.solanaProgramId);

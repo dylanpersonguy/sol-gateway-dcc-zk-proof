@@ -91,6 +91,11 @@ async function dccValue(node: string, contract: string, key: string): Promise<an
 
 async function main() {
   const broadcast = process.argv.includes('--broadcast');
+  // Ask the node to run the transaction without submitting it. Proves the call
+  // would succeed — signatures, whitelist, limits, the lot — without spending.
+  const validateOnly = process.argv.includes('--validate');
+  const limitArg = process.argv.indexOf('--limit');
+  const limit = limitArg !== -1 ? parseInt(process.argv[limitArg + 1], 10) : Infinity;
 
   const rpc = process.env.SOLANA_RPC_URL!;
   const programId = new PublicKey(process.env.SOLANA_PROGRAM_ID!);
@@ -99,7 +104,7 @@ async function main() {
   const seed = process.env.DCC_SIGNING_SEED || process.env.DCC_VALIDATOR_SEED!;
   const chainId = parseInt(process.env.DCC_CHAIN_ID || '63', 10);
 
-  console.log(broadcast ? '=== SETTLE (BROADCASTING) ===' : '=== SETTLE (dry run — nothing is sent) ===');
+  console.log(broadcast ? '=== SETTLE (BROADCASTING) ===' : validateOnly ? '=== SETTLE (validate against node — nothing is sent) ===' : '=== SETTLE (dry run — nothing is sent) ===');
 
   // Only keys registered on the contract can produce an accepted signature.
   const signerPub = dccPublicKey(seed);
@@ -162,11 +167,13 @@ async function main() {
 
     const message = `SOL_DCC_BRIDGE_V1|MINT|${d.transferId}|${d.recipient}|${netAmount}|${d.slot}|${chainId}`;
 
-    if (!broadcast) {
+    if (!broadcast && !validateOnly) {
       console.log(`  MINT  ${label}  net=${netAmount} (fee ${fee.feeLamports})`);
       settled++;
       continue;
     }
+
+    if (settled >= limit) { console.log(`  STOP  reached --limit ${limit}`); break; }
 
     try {
       const sig = dccSignBytes(seed, new Uint8Array(Buffer.from(message, 'utf8'))) as unknown as string;
@@ -188,9 +195,23 @@ async function main() {
         payment: [],
         fee: 900000,
       }, seed);
-      const res: any = await send(tx, node);
-      console.log(`  SENT  ${label}  tx=${res.id}`);
-      settled++;
+      if (validateOnly) {
+        const { data } = await axios.post(`${node}/debug/validate`, tx, {
+          timeout: 30_000,
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.DCC_API_KEY ?? '' },
+        });
+        if (data?.valid) {
+          console.log(`  VALID ${label}  net=${netAmount}`);
+          settled++;
+        } else {
+          console.error(`  INVALID ${label}\n        ${data?.error ?? JSON.stringify(data).slice(0, 300)}`);
+          failed++;
+        }
+      } else {
+        const res: any = await send(tx, node);
+        console.log(`  SENT  ${label}  tx=${res.id}`);
+        settled++;
+      }
     } catch (err: any) {
       console.error(`  FAIL  ${label}\n        ${err?.message ?? err}`);
       failed++;
