@@ -6,6 +6,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { PublicKey } from '@solana/web3.js';
 import { createLogger } from '../utils/logger';
+import { estimatedUnlockTime } from '../utils/timing';
 import { readBridgeConfig, lamportsToSol } from '../utils/bridge-config';
 import {
   isValidDccAddress,
@@ -83,7 +84,7 @@ redeemRouter.post('/', async (req: Request, res: Response, next: NextFunction) =
         wsolAssetId: dccCfg.wsolAssetId,
         amountUnits,
         solRecipient,
-        estimatedUnlockTime: '3-10 minutes',
+        estimatedUnlockTime: estimatedUnlockTime(),
         estimatedFee: '0.005 DCC',
       },
     });
@@ -136,7 +137,7 @@ redeemRouter.get('/limits', async (_req: Request, res: Response, next: NextFunct
       maxDailyRedeem,
       remainingDailyRedeem,
       bridgeStatus: paused ? 'paused' : 'active',
-      estimatedUnlockTime: '3-10 minutes',
+      estimatedUnlockTime: estimatedUnlockTime(),
       dccConfirmations: 10,
     });
   } catch (err) {
