@@ -55,9 +55,20 @@ async function main() {
   const chainId = process.env.DCC_CHAIN_ID_CHAR || '?';
 
   // The admin is the contract account itself, so its seed signs these calls.
-  const adminSeedPath = process.env.DCC_ADMIN_SEED_PATH
-    || path.resolve(__dirname, '../validator/data/keys/dcc-bridge-account.seed');
-  const adminSeed = fs.readFileSync(adminSeedPath, 'utf-8').trim();
+  // Prefer the environment: the admin seed can upgrade the contract and rewrite
+  // the validator set, so it should not be sitting in the repo. Load it with
+  // `source ./scripts/secrets.sh`. A file path is still accepted for setups
+  // that mount secrets rather than inject them.
+  const adminSeed = (process.env.DCC_ADMIN_SEED
+    || (process.env.DCC_ADMIN_SEED_PATH
+        ? fs.readFileSync(process.env.DCC_ADMIN_SEED_PATH, 'utf-8')
+        : '')).trim();
+
+  if (!adminSeed) {
+    console.error('No admin seed. Set DCC_ADMIN_SEED (see scripts/secrets.sh)');
+    console.error('or point DCC_ADMIN_SEED_PATH at a file containing it.');
+    process.exit(1);
+  }
 
   const toUnits = (sol: number) => Math.round(sol * 10 ** WSOL_DECIMALS);
   const toSol = (units: number) => units / 10 ** WSOL_DECIMALS;
