@@ -3,122 +3,101 @@
 /**
  * generate-validator-key.ts
  *
- * Generates a new Ed25519 key pair for a validator node.
- * Stores encrypted with AES-256-GCM.
+ * Generates a validator signing key and prints the public key to register on
+ * the DCC bridge contract's validator whitelist.
+ *
+ * The key is created through ThresholdSigner itself rather than by
+ * re-implementing the crypto here — that guarantees the scheme (DecentralChain
+ * Curve25519, matching the contract's sigVerify) and the on-disk format stay in
+ * step with whatever the validator actually loads. An earlier version of this
+ * script wrote a scrypt/JSON envelope of a NaCl Ed25519 key: wrong curve, and a
+ * format the signer could not read.
  *
  * Usage:
- *   ts-node scripts/generate-validator-key.ts \
- *     --output ./data/keys/validator.key \
- *     [--hsm-enabled true --hsm-slot 0]
+ *   SIGNER_ENCRYPTION_KEY=<64-hex> \
+ *     ts-node scripts/generate-validator-key.ts --output ./validator/data/keys/validator.key
+ *
+ * Without SIGNER_ENCRYPTION_KEY the signer writes the encryption key beside the
+ * key file, which is fine for development and not for production.
  */
 
-import * as nacl from "tweetnacl";
-import * as crypto from "crypto";
-import * as fs from "fs";
-import * as path from "path";
-import * as readline from "readline";
+import * as fs from 'fs';
+import * as path from 'path';
+import { ThresholdSigner } from '../validator/src/signer/threshold-signer';
+
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+function base58(bytes: Buffer): string {
+  let num = BigInt('0x' + bytes.toString('hex'));
+  const out: string[] = [];
+  while (num > 0n) {
+    out.unshift(BASE58[Number(num % 58n)]);
+    num /= 58n;
+  }
+  for (const b of bytes) {
+    if (b !== 0) break;
+    out.unshift('1');
+  }
+  return out.join('') || '1';
+}
 
 async function main() {
   const argv = process.argv.slice(2);
-  const outputIdx = argv.indexOf("--output");
-  const outputPath = outputIdx !== -1 ? argv[outputIdx + 1] : "./validator.key";
-  const hsmEnabled =
-    argv.indexOf("--hsm-enabled") !== -1 &&
-    argv[argv.indexOf("--hsm-enabled") + 1] === "true";
+  const at = (flag: string) => {
+    const i = argv.indexOf(flag);
+    return i === -1 ? undefined : argv[i + 1];
+  };
 
-  console.log("=== Validator Key Generation ===");
+  const outputPath = at('--output') ?? './validator.key';
+  const force = argv.includes('--force');
 
-  if (hsmEnabled) {
-    console.log("HSM mode enabled — key will be generated inside HSM.");
-    console.log(
-      "TODO: Integrate PKCS#11 library for your specific HSM hardware."
-    );
-    console.log("Supported HSMs: YubiHSM2, AWS CloudHSM, Azure Managed HSM");
-    return;
-  }
-
-  // Generate Ed25519 key pair
-  const keypair = nacl.sign.keyPair();
-
-  console.log("Public key (hex):", Buffer.from(keypair.publicKey).toString("hex"));
-  console.log("Public key (base58):", encodeBase58(keypair.publicKey));
-
-  // Prompt for encryption passphrase
-  const passphrase = await prompt(
-    "Enter passphrase to encrypt private key: "
-  );
-  if (!passphrase || passphrase.length < 12) {
-    console.error("❌ Passphrase must be at least 12 characters.");
+  if (fs.existsSync(outputPath) && !force) {
+    console.error(`Refusing to overwrite an existing key at ${outputPath}.`);
+    console.error('Re-run with --force if you intend to rotate, and be aware the');
+    console.error('new public key must be registered on the bridge contract before');
+    console.error('this validator can take part in consensus again.');
     process.exit(1);
   }
 
-  // Derive encryption key from passphrase
-  const salt = crypto.randomBytes(32);
-  const encKey = crypto.scryptSync(passphrase, salt, 32);
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv("aes-256-gcm", encKey, iv);
-  const encrypted = Buffer.concat([
-    cipher.update(Buffer.from(keypair.secretKey)),
-    cipher.final(),
-  ]);
-  const authTag = cipher.getAuthTag();
-
-  // Store encrypted key
-  const keyData = {
-    version: 1,
-    algorithm: "aes-256-gcm",
-    kdf: "scrypt",
-    salt: salt.toString("hex"),
-    iv: iv.toString("hex"),
-    authTag: authTag.toString("hex"),
-    publicKey: Buffer.from(keypair.publicKey).toString("hex"),
-    encryptedPrivateKey: encrypted.toString("hex"),
-  };
+  if (force && fs.existsSync(outputPath)) {
+    const backup = `${outputPath}.${Date.now()}.bak`;
+    fs.renameSync(outputPath, backup);
+    if (fs.existsSync(`${outputPath}.key`)) {
+      fs.renameSync(`${outputPath}.key`, `${backup}.key`);
+    }
+    console.log(`Existing key moved to ${backup}`);
+  }
 
   const dir = path.dirname(outputPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  fs.writeFileSync(outputPath, JSON.stringify(keyData, null, 2), {
-    mode: 0o600,
-  });
+  if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-  console.log(`\n✅ Key saved to ${outputPath}`);
-  console.log("   File permissions: 600 (owner read/write only)");
-  console.log("\n🔒 IMPORTANT: Back up this file and your passphrase separately!");
-  console.log("   Never store both in the same location.");
-}
-
-function encodeBase58(bytes: Uint8Array): string {
-  const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-  let num = BigInt("0x" + Buffer.from(bytes).toString("hex"));
-  const result: string[] = [];
-  while (num > 0n) {
-    const mod = Number(num % 58n);
-    result.unshift(ALPHABET[mod]);
-    num = num / 58n;
-  }
-  for (const b of bytes) {
-    if (b === 0) result.unshift("1");
-    else break;
-  }
-  return result.join("");
-}
-
-function prompt(question: string): Promise<string> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
+  const signer = new ThresholdSigner({
+    privateKeyPath: outputPath,
+    hsmEnabled: false,
+    hsmSlot: 0,
+    hsmPin: '',
+    keyRotationIntervalHours: 24 * 30,
   });
-  return new Promise((resolve) => {
-    rl.question(question, (answer: string) => {
-      rl.close();
-      resolve(answer);
-    });
-  });
+  await signer.initialize();
+
+  const pub = signer.getPublicKey();
+
+  console.log('\n=== Validator signing key ===');
+  console.log('  scheme            : DecentralChain Curve25519 (contract sigVerify)');
+  console.log('  key file          :', outputPath);
+  console.log('  public key (hex)  :', pub.toString('hex'));
+  console.log('  public key (b58)  :', base58(pub));
+  console.log('\nRegister the base58 public key on the bridge contract before this');
+  console.log('validator participates — attestations from an unregistered key are');
+  console.log('rejected by the consensus whitelist.');
+
+  if (!process.env.SIGNER_ENCRYPTION_KEY) {
+    console.log('\nNote: SIGNER_ENCRYPTION_KEY was not set, so the encryption key was');
+    console.log(`written to ${outputPath}.key. Set it in the environment for production.`);
+  }
 }
 
 main().catch((err) => {
-  console.error("❌ Key generation failed:", err);
+  console.error('Key generation failed:', err);
   process.exit(1);
 });

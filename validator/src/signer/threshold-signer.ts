@@ -3,8 +3,15 @@
 // ═══════════════════════════════════════════════════════════════
 //
 // Manages cryptographic signing for validator attestations.
+//
+// SCHEME: DecentralChain Curve25519 (the same primitive as RIDE's sigVerify).
+// This is not interchangeable with NaCl Ed25519 — attestation signatures are
+// ultimately submitted to the bridge contract's committeeMint, so the chain's
+// scheme is authoritative. ConsensusEngine.receiveAttestation verifies with
+// the matching verifySignature().
+//
 // Supports:
-// - Ed25519 signatures (Solana native)
+// - DCC Curve25519 signatures (verified on-chain by sigVerify)
 // - Hardware Security Module (HSM) integration
 // - Key rotation
 // - Threshold signatures (future MPC upgrade)
@@ -12,7 +19,15 @@
 // SECURITY: Private keys should NEVER be in memory longer than
 // necessary. HSM mode keeps keys in hardware at all times.
 
-import * as nacl from 'tweetnacl';
+import {
+  keyPair as dccKeyPair,
+  signBytes as dccSignBytes,
+  verifySignature as dccVerifySignature,
+  publicKey as dccPublicKeyFrom,
+  base58Decode,
+  base58Encode,
+  randomSeed,
+} from '@decentralchain/ts-lib-crypto';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { Logger } from 'winston';
@@ -26,6 +41,21 @@ export interface SignerConfig {
   keyRotationIntervalHours: number;
 }
 
+/** Raw 32-byte Curve25519 keys, decoded from the library's base58 form. */
+interface RawKeyPair {
+  publicKey: Uint8Array;
+  privateKey: Uint8Array;
+}
+
+/** Generate a fresh DCC keypair as raw bytes. */
+function generateDccKeyPair(): RawKeyPair {
+  const kp = dccKeyPair(randomSeed());
+  return {
+    publicKey: base58Decode(kp.publicKey),
+    privateKey: base58Decode(kp.privateKey),
+  };
+}
+
 export interface KeyPairInfo {
   publicKey: Buffer;
   createdAt: number;
@@ -35,7 +65,7 @@ export interface KeyPairInfo {
 export class ThresholdSigner {
   private config: SignerConfig;
   private logger: Logger;
-  private keyPair: nacl.SignKeyPair | null = null;
+  private keyPair: RawKeyPair | null = null;
   private keyInfo: KeyPairInfo | null = null;
   private signatureCount: number = 0;
 
@@ -91,10 +121,10 @@ export class ThresholdSigner {
    */
   verify(message: Buffer, signature: Buffer, publicKey: Buffer): boolean {
     try {
-      return nacl.sign.detached.verify(
+      return dccVerifySignature(
+        new Uint8Array(publicKey),
         new Uint8Array(message),
         new Uint8Array(signature),
-        new Uint8Array(publicKey)
       );
     } catch {
       return false;
@@ -109,7 +139,7 @@ export class ThresholdSigner {
   async rotateKey(): Promise<KeyPairInfo> {
     this.logger.info('Rotating signing key');
 
-    const newKeyPair = nacl.sign.keyPair();
+    const newKeyPair = generateDccKeyPair();
     const oldPublicKey = this.keyPair
       ? Buffer.from(this.keyPair.publicKey).toString('hex')
       : 'none';
@@ -145,9 +175,13 @@ export class ThresholdSigner {
       this.logger.info('Loaded existing key pair');
     } else {
       // Generate new key pair
-      this.keyPair = nacl.sign.keyPair();
+      this.keyPair = generateDccKeyPair();
       await this.saveEncryptedKey(this.keyPair);
       this.logger.info('Generated new key pair');
+    }
+
+    if (!this.keyPair) {
+      throw new Error('Signer key pair failed to initialize');
     }
 
     this.keyInfo = {
@@ -185,13 +219,14 @@ export class ThresholdSigner {
       throw new Error('Signer not initialized');
     }
 
-    const signature = nacl.sign.detached(
+    // signBytes returns a base58 string; callers expect raw 64 bytes.
+    const sigB58 = dccSignBytes(
+      { privateKey: base58Encode(this.keyPair.privateKey) },
       new Uint8Array(message),
-      this.keyPair.secretKey
     );
 
     this.signatureCount++;
-    return Promise.resolve(Buffer.from(signature));
+    return Promise.resolve(Buffer.from(base58Decode(sigB58 as string)));
   }
 
   private async signWithHSM(message: Buffer): Promise<Buffer> {
@@ -200,7 +235,7 @@ export class ThresholdSigner {
     return this.signSoftware(message);
   }
 
-  private async saveEncryptedKey(keyPair: nacl.SignKeyPair): Promise<void> {
+  private async saveEncryptedKey(keyPair: RawKeyPair): Promise<void> {
     // Encrypt the private key before saving to disk
     // Use SIGNER_ENCRYPTION_KEY env var if available, otherwise generate random key and save to .key file
     const envKey = process.env.SIGNER_ENCRYPTION_KEY;
@@ -211,7 +246,7 @@ export class ThresholdSigner {
     const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey, iv);
 
     const encrypted = Buffer.concat([
-      cipher.update(Buffer.from(keyPair.secretKey)),
+      cipher.update(Buffer.from(keyPair.privateKey)),
       cipher.final(),
     ]);
     const authTag = cipher.getAuthTag();
@@ -239,7 +274,7 @@ export class ThresholdSigner {
     }
   }
 
-  private decryptKeyPair(encryptedData: Buffer): nacl.SignKeyPair {
+  private decryptKeyPair(encryptedData: Buffer): RawKeyPair {
     // Prefer env var, fall back to .key file
     const envKey = process.env.SIGNER_ENCRYPTION_KEY;
     let encryptionKey: Buffer;
@@ -265,7 +300,26 @@ export class ThresholdSigner {
       decipher.final(),
     ]);
 
-    return nacl.sign.keyPair.fromSecretKey(new Uint8Array(decrypted));
+    // A NaCl secret key is 64 bytes; a DCC private key is 32. A legacy key
+    // cannot produce signatures that sigVerify (or the consensus layer) will
+    // accept, so fail loudly rather than sign attestations nobody can verify.
+    if (decrypted.length !== 32) {
+      throw new Error(
+        `Signing key at ${this.config.privateKeyPath} is ${decrypted.length} bytes — ` +
+        'expected a 32-byte DecentralChain private key. This is a legacy NaCl ' +
+        'Ed25519 key, whose signatures the bridge contract cannot verify. ' +
+        'Delete the key file to generate a DCC key, then register the new ' +
+        'public key on the bridge contract.',
+      );
+    }
+
+    const privateKey = new Uint8Array(decrypted);
+    return {
+      privateKey,
+      publicKey: base58Decode(
+        dccPublicKeyFrom({ privateKey: base58Encode(privateKey) }),
+      ),
+    };
   }
 
   getStats(): {
