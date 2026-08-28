@@ -24,7 +24,19 @@ import * as path from 'path';
 
 export interface ConsensusConfig {
   nodeId: string;
+  /**
+   * Signatures required before a transfer is submitted. Each chain sets its
+   * own: the DCC contract's min_validators governs mints, the Solana program's
+   * governs unlocks. A single threshold cannot serve both — with 1, unlocks
+   * submit one signature and Solana rejects them; with 3, mints never resolve,
+   * because every node signs a mint with the same DCC key and dedup collapses
+   * them to one attestation.
+   */
   minValidators: number;
+  /** Overrides minValidators for mints. Defaults to minValidators. */
+  minValidatorsMint?: number;
+  /** Overrides minValidators for unlocks. Defaults to minValidators. */
+  minValidatorsUnlock?: number;
   consensusTimeoutMs: number;
   maxRetries: number;
   /** Chain id inside the signed mint message — the contract's dccChainId (2). */
@@ -367,11 +379,18 @@ export class ConsensusEngine extends EventEmitter {
       transferId,
       nodeId,
       total: pending.attestations.length,
-      required: this.config.minValidators,
+      required: this.requiredFor(attestation.type),
     });
 
     // Check if we've reached consensus
     this.checkConsensus(transferId);
+  }
+
+  /** Signatures required for this attestation type. */
+  private requiredFor(type: AttestationType): number {
+    return type === 'unlock'
+      ? this.config.minValidatorsUnlock ?? this.config.minValidators
+      : this.config.minValidatorsMint ?? this.config.minValidators;
   }
 
   /**
@@ -381,7 +400,8 @@ export class ConsensusEngine extends EventEmitter {
     const pending = this.pendingConsensus.get(transferId);
     if (!pending || pending.resolved) return;
 
-    if (pending.attestations.length >= this.config.minValidators) {
+    const required = this.requiredFor(pending.request.type);
+    if (pending.attestations.length >= required) {
       pending.resolved = true;
 
       const result: ConsensusResult = {
@@ -389,7 +409,7 @@ export class ConsensusEngine extends EventEmitter {
         type: pending.request.type,
         attestations: pending.attestations,
         achieved: true,
-        requiredSignatures: this.config.minValidators,
+        requiredSignatures: required,
         receivedSignatures: pending.attestations.length,
         event: pending.request.event,
         requestTimestamp: pending.request.timestamp,
@@ -428,7 +448,7 @@ export class ConsensusEngine extends EventEmitter {
     this.logger.warn('Consensus timeout', {
       transferId,
       received: pending.attestations.length,
-      required: this.config.minValidators,
+      required: this.requiredFor(pending.request.type),
     });
 
     const result: ConsensusResult = {
@@ -436,7 +456,7 @@ export class ConsensusEngine extends EventEmitter {
       type: pending.request.type,
       attestations: pending.attestations,
       achieved: false,
-      requiredSignatures: this.config.minValidators,
+      requiredSignatures: this.requiredFor(pending.request.type),
       receivedSignatures: pending.attestations.length,
     };
 
@@ -590,7 +610,7 @@ export class ConsensusEngine extends EventEmitter {
       ([transferId, pending]) => ({
         transferId,
         attestations: pending.attestations.length,
-        required: this.config.minValidators,
+        required: this.requiredFor(pending.request.type),
       })
     );
 

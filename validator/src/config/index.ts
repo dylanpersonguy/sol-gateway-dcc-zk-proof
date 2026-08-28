@@ -37,6 +37,10 @@ export interface ValidatorConfig {
 
   // ── Consensus ──
   minValidators: number;
+  /** Signatures a mint needs — the DCC contract's min_validators. */
+  minValidatorsMint: number;
+  /** Signatures an unlock needs — the Solana program's min_validators. */
+  minValidatorsUnlock: number;
   consensusTimeoutMs: number;
   maxRetries: number;
 
@@ -147,6 +151,10 @@ function parseDccConfig() {
 function parseConsensusConfig() {
   return {
     minValidators: envInt('MIN_VALIDATORS', 3),
+    // Each chain sets its own bar: the DCC contract's min_validators for mints,
+    // the Solana program's for unlocks. Both fall back to MIN_VALIDATORS.
+    minValidatorsMint: envInt('MIN_VALIDATORS_MINT', envInt('MIN_VALIDATORS', 3)),
+    minValidatorsUnlock: envInt('MIN_VALIDATORS_UNLOCK', envInt('MIN_VALIDATORS', 3)),
     consensusTimeoutMs: envInt('CONSENSUS_TIMEOUT_MS', 30000),
     maxRetries: envInt('MAX_RETRIES', 3),
     reorgProtectionSlots: envInt('REORG_PROTECTION_SLOTS', 50),
