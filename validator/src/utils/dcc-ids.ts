@@ -45,7 +45,17 @@ export function dccIdToBytes32(id: string): Buffer {
  * Derived from the burn's own on-chain timestamp so every validator computes
  * the same value. Taking it from local time made each node sign a different
  * message, and consensus could never agree on one.
+ *
+ * The window has to outlast any plausible outage. At one hour, a burn that went
+ * unprocessed while validators were down could never be unlocked afterwards —
+ * the program rejects it with TransferExpired and the SOL stays in the vault
+ * with no automatic path out. A day gives recovery room while still bounding
+ * how stale a signed unlock may be; the unlock record PDA is what actually
+ * prevents replay.
  */
-export function unlockExpiration(burnTimestampMs: number, windowSeconds = 3600): number {
+export function unlockExpiration(
+  burnTimestampMs: number,
+  windowSeconds = parseInt(process.env.UNLOCK_EXPIRY_SECONDS || '86400', 10),
+): number {
   return Math.floor(burnTimestampMs / 1000) + windowSeconds;
 }
