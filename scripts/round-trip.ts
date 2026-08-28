@@ -205,16 +205,31 @@ async function main() {
   // ── 4. validators unlock on Solana ───────────────────────────
   console.log('\n[4/4] waiting for the validators to unlock on Solana');
 
-  // Watch for the balance to RISE from its post-burn low, rather than compare
-  // against a threshold derived from the deposit. The depositor also pays
-  // Solana fees and the unlock returns the amount net of the withdrawal fee,
-  // so the balance legitimately ends below `before - deposit` on a completely
-  // successful round trip — which read as a failure and polled to the timeout.
-  const afterBurn = await conn.getBalance(depositor.publicKey);
+  // Watch for the unlock TRANSACTION, not for the balance.
+  //
+  // Two balance-based versions of this check were wrong. Comparing against
+  // `before - deposit` never matched, because fees on both legs put the final
+  // balance below that. Watching for a rise from a post-burn snapshot fails
+  // differently: the snapshot is taken after the burn is submitted, so an
+  // unlock still queued from an EARLIER burn can land in that window and
+  // inflate the baseline. This round trip's own unlock then never rises above
+  // it, and a completed transfer is reported as "DID NOT LAND" -- exactly what
+  // happened with four backlog unlocks in flight.
+  //
+  // A successful signature carrying an unlock, newer than our burn, is
+  // unambiguous regardless of what else is settling concurrently.
+  const burnSentAt = Math.floor(Date.now() / 1000);
   const unlocked = await waitFor('unlock', 15 * 60 * 1000, 10000, async () => {
-    const now = await conn.getBalance(depositor.publicKey);
-    return now > afterBurn ? now : null;
+    const sigs = await conn.getSignaturesForAddress(depositor.publicKey, { limit: 15 });
+    for (const s of sigs) {
+      // Tolerate a little clock skew between this host and the cluster.
+      if (!s.blockTime || s.blockTime < burnSentAt - 90 || s.err) continue;
+      const tx = await conn.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 });
+      if (/unlock/i.test((tx?.meta?.logMessages ?? []).join(' '))) return s.signature;
+    }
+    return null;
   });
+  if (unlocked) console.log(`      unlock tx  : ${unlocked}`);
 
   const solAfter = await conn.getBalance(depositor.publicKey);
   const wsolAfter = await wsolBalance(node, dccAddress, wsolAsset);
@@ -224,7 +239,7 @@ async function main() {
   console.log(`  the net is negative by design: bridge fees on both legs plus Solana tx fees`);
   console.log(`  wSOL before ${wsolBefore}  after ${wsolAfter}`);
   console.log(`  deposit -> mint : OK`);
-  console.log(`  burn -> unlock  : ${unlocked ? 'OK' : 'DID NOT LAND — check validator logs'}`);
+  console.log(`  burn -> unlock  : ${unlocked ? `OK (${unlocked.slice(0,20)}...)` : 'DID NOT LAND — check validator logs'}`);
   if (!unlocked) process.exit(1);
 }
 
