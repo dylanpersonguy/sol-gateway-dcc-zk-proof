@@ -487,7 +487,7 @@ export class ConsensusEngine extends EventEmitter {
    * Construct the canonical mint attestation message.
    * Used for SOL→DCC deposits triggering wSOL minting on DCC.
    *
-   * MUST match RIDE contract's committeeMint signature verification:
+   * MUST match RIDE contract's mint signature verification:
    *   toBytes(transferId + "|" + recipient + "|" + amount + "|" + solSlot)
    * where recipient is the base58 DCC address derived from the raw bytes.
    */

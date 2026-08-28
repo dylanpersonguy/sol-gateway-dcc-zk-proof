@@ -127,7 +127,7 @@ async function main(): Promise<void> {
 
   // ── DCC attestation signing key ──
   // This validator's own seed. Its public key must be registered on the bridge
-  // contract: committeeMint calls isValidatorActive() on every pubkey it is
+  // contract: mint calls isValidatorActive() on every pubkey it is
   // handed and throws "Validator not active" on the first one that is not.
   //
   // Previously this derived a per-node key as `${seed}:bridge-signer:${nodeId}`,
@@ -345,7 +345,7 @@ async function main(): Promise<void> {
 
     // ── Fee Calculation ──
     // Apply fee BEFORE consensus so all validators sign over the net (fee-adjusted) amount.
-    // This ensures the canonical message hash matches the amount passed to DCC committeeMint.
+    // This ensures the canonical message hash matches the amount passed to DCC mint.
     const depositFee = calculateDepositFee(amountBigint, config);
     logFee(depositFee, event.transferId);
 
@@ -615,7 +615,7 @@ async function submitMintToDcc(
   // Signing the same message again with a sibling key derived from this
   // validator's own seed would present one signer as two — the exact attack
   // the contract's duplicate-pubkey check (CRIT-5) exists to stop — and that
-  // key is not registered, so committeeMint would throw "Validator not active"
+  // key is not registered, so mint would throw "Validator not active"
   // regardless. If the threshold is not met, the mint should not proceed.
 
   logger.info('Submitting mint to DCC', {
@@ -721,7 +721,7 @@ async function submitMintToDcc(
     return;
   }
   // ────────────────────────────────────────────────────────────────────
-  // Native SOL → bridge controller committeeMint (existing path)
+  // Native SOL → bridge controller mint (existing path)
   try {
     const { id: txId } = await signAndBroadcastMint({
       dApp: config.dccBridgeContract,

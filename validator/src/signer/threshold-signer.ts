@@ -6,7 +6,7 @@
 //
 // SCHEME: DecentralChain Curve25519 (the same primitive as RIDE's sigVerify).
 // This is not interchangeable with NaCl Ed25519 — attestation signatures are
-// ultimately submitted to the bridge contract's committeeMint, so the chain's
+// ultimately submitted to the bridge contract's mint, so the chain's
 // scheme is authoritative. ConsensusEngine.receiveAttestation verifies with
 // the matching verifySignature().
 //
