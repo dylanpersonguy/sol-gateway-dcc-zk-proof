@@ -37,6 +37,8 @@ export interface MonitorConfig {
   // Chain monitoring
   maxBlockLatency: number;        // seconds
   minChainProgressRatio: number;  // e.g., 0.5 = alert if a chain advances at <50% of its expected rate
+  /** Warn when a fee payer has fewer than this many transactions left. */
+  minFeePayerTransactions: number;
 }
 
 export interface AnomalyAlert {
@@ -391,6 +393,49 @@ export class AnomalyDetector extends EventEmitter {
   /**
    * Monitor for bridge pause/resume events
    */
+  /**
+   * Fee-payer balances.
+   *
+   * A validator that cannot pay a transaction fee stops bridging without
+   * failing anything visibly: deposits keep locking on the source chain and
+   * nothing mints on the destination. That is exactly how this bridge sat with
+   * 47 unprocessed deposits — the DCC fee payer held zero and nothing said so.
+   *
+   * Thresholds are in transactions remaining, not absolute balance, so they
+   * stay meaningful if fees change.
+   */
+  checkFeePayerBalance(
+    chain: 'dcc' | 'solana',
+    balance: bigint,
+    feePerTx: bigint,
+    address: string,
+  ): void {
+    const now = Date.now();
+    const remaining = feePerTx > 0n ? Number(balance / feePerTx) : 0;
+
+    if (remaining === 0) {
+      this.raiseAlert({
+        id: `fee_payer_empty_${chain}_${now}`,
+        severity: 'critical',
+        category: 'fee_payer_exhausted',
+        message: `${chain.toUpperCase()} fee payer cannot afford a single transaction — bridging is halted`,
+        autoPause: false,
+        timestamp: now,
+        data: { chain, address, balance: balance.toString(), feePerTx: feePerTx.toString() },
+      });
+    } else if (remaining < this.config.minFeePayerTransactions) {
+      this.raiseAlert({
+        id: `fee_payer_low_${chain}_${now}`,
+        severity: 'warning',
+        category: 'fee_payer_low',
+        message: `${chain.toUpperCase()} fee payer has ~${remaining} transactions left`,
+        autoPause: false,
+        timestamp: now,
+        data: { chain, address, balance: balance.toString(), remaining },
+      });
+    }
+  }
+
   checkPauseEvent(isPaused: boolean, triggeredBy: string): void {
     if (isPaused) {
       this.raiseAlert({
