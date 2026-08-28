@@ -812,16 +812,20 @@ async function submitUnlockToSolana(
     Buffer.from(new BigInt64Array([BigInt(expiration)]).buffer), // expiration as i64 LE
   ]);
 
-  // ── Build Ed25519 precompile instructions (one per attestation) ──
-  const ed25519Instructions: TransactionInstruction[] = [];
-  for (const attestation of result.attestations) {
-    const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
-      publicKey: Uint8Array.from(attestation.publicKey),
-      message: Uint8Array.from(message),
-      signature: Uint8Array.from(attestation.signature),
-    });
-    ed25519Instructions.push(ed25519Ix);
-  }
+  // ── Build ONE Ed25519 precompile instruction carrying every signature ──
+  // createInstructionWithPublicKey emits one instruction per signature, each
+  // repeating the 140-byte message. Measured serialized sizes against the
+  // 1232-byte packet limit:
+  //
+  //   per-signature instructions   1 val  917    2 val 1323 (over)  3 val 1703 (over)
+  //   packed, message shared once  1 val  917    2 val 1156         3 val over
+  //
+  // The precompile reads num_signatures and iterates, and the program's
+  // introspection parses the same layout, so one packed instruction is
+  // equivalent — and it is what makes more than a single validator possible.
+  const ed25519Instructions: TransactionInstruction[] = [
+    buildPackedEd25519Instruction(result.attestations, message),
+  ];
 
   // ── Derive PDAs ──
   const [bridgeConfigPda] = PublicKey.findProgramAddressSync(
@@ -956,6 +960,50 @@ interface UnlockParamsInput {
  *       validator: Pubkey (32 bytes)
  *       signature: [u8; 64]
  */
+/**
+ * Pack N (pubkey, signature) pairs into a single Ed25519 precompile
+ * instruction that references one shared copy of the message.
+ *
+ * Layout: [num_signatures u8][padding u8][N x 14-byte offset structs]
+ *         [N pubkeys][N signatures][message]
+ * 0xffff as an instruction index means "this instruction".
+ */
+function buildPackedEd25519Instruction(
+  attestations: Attestation[],
+  message: Buffer,
+): TransactionInstruction {
+  const n = attestations.length;
+  const HEADER = 2;
+  const OFFSETS = 14;
+  const pubkeysAt = HEADER + n * OFFSETS;
+  const signaturesAt = pubkeysAt + n * 32;
+  const messageAt = signaturesAt + n * 64;
+
+  const data = Buffer.alloc(messageAt + message.length);
+  data.writeUInt8(n, 0);
+  data.writeUInt8(0, 1);
+
+  attestations.forEach((a, i) => {
+    const o = HEADER + i * OFFSETS;
+    data.writeUInt16LE(signaturesAt + i * 64, o);
+    data.writeUInt16LE(0xffff, o + 2);
+    data.writeUInt16LE(pubkeysAt + i * 32, o + 4);
+    data.writeUInt16LE(0xffff, o + 6);
+    data.writeUInt16LE(messageAt, o + 8);
+    data.writeUInt16LE(message.length, o + 10);
+    data.writeUInt16LE(0xffff, o + 12);
+    Buffer.from(a.publicKey).copy(data, pubkeysAt + i * 32);
+    Buffer.from(a.signature).copy(data, signaturesAt + i * 64);
+  });
+  message.copy(data, messageAt);
+
+  return new TransactionInstruction({
+    programId: new PublicKey('Ed25519SigVerify111111111111111111111111111'),
+    keys: [],
+    data,
+  });
+}
+
 function serializeUnlockParams(params: UnlockParamsInput): Buffer {
   const parts: Buffer[] = [];
 
