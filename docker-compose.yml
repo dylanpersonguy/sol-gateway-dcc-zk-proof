@@ -186,6 +186,10 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+      args:
+        # Vite inlines these at build time; runtime env does nothing.
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_SOLANA_RPC_URL: ${VITE_SOLANA_RPC_URL:?set a public Solana RPC URL}
     environment:
       PORT: "3000"
     ports:
