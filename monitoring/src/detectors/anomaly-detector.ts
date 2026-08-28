@@ -36,7 +36,7 @@ export interface MonitorConfig {
   
   // Chain monitoring
   maxBlockLatency: number;        // seconds
-  maxChainDesyncBlocks: number;
+  minChainProgressRatio: number;  // e.g., 0.5 = alert if a chain advances at <50% of its expected rate
 }
 
 export interface AnomalyAlert {
@@ -203,12 +203,24 @@ export class AnomalyDetector extends EventEmitter {
   }
 
   /**
-   * Monitor chain synchronization
+   * Monitor chain synchronization.
+   *
+   * Solana slots and DCC blocks are independent counters from different
+   * genesis epochs, so their absolute heights are never comparable. Instead,
+   * this tracks each chain's own advancement between calls and alerts if a
+   * chain is producing new blocks/slots much slower than its expected rate
+   * (a real sign of a stalled or unreachable node), rather than diffing the
+   * two heights directly.
    */
+  private previousChainCheck: { timestamp: number; solSlot: number; dccHeight: number } | null = null;
+  private static readonly SOLANA_SECONDS_PER_SLOT = 0.4;
+  private static readonly DCC_SECONDS_PER_BLOCK = 3;
+
   checkChainSync(
     solanaLatency: number,
     dccLatency: number,
-    blockDifference: number
+    solSlot: number,
+    dccHeight: number
   ): void {
     if (solanaLatency > this.config.maxBlockLatency) {
       this.raiseAlert({
@@ -234,17 +246,40 @@ export class AnomalyDetector extends EventEmitter {
       });
     }
 
-    if (blockDifference > this.config.maxChainDesyncBlocks) {
-      this.raiseAlert({
-        id: `chain_desync_${Date.now()}`,
-        severity: 'critical',
-        category: 'chain_desync',
-        message: `Chains desynchronized by ${blockDifference} blocks`,
-        data: { blockDifference },
-        timestamp: Date.now(),
-        autoPause: true,
-      });
+    const now = Date.now();
+    const prev = this.previousChainCheck;
+    if (prev) {
+      const elapsedSec = (now - prev.timestamp) / 1000;
+
+      const expectedSolSlots = elapsedSec / AnomalyDetector.SOLANA_SECONDS_PER_SLOT;
+      const actualSolSlots = solSlot - prev.solSlot;
+      if (expectedSolSlots >= 10 && actualSolSlots < expectedSolSlots * this.config.minChainProgressRatio) {
+        this.raiseAlert({
+          id: `solana_stalled_${Date.now()}`,
+          severity: 'critical',
+          category: 'chain_desync',
+          message: `Solana appears stalled: ${actualSolSlots} slots advanced in ${elapsedSec.toFixed(0)}s (expected ~${expectedSolSlots.toFixed(0)})`,
+          data: { actualSolSlots, expectedSolSlots, elapsedSec },
+          timestamp: Date.now(),
+          autoPause: true,
+        });
+      }
+
+      const expectedDccBlocks = elapsedSec / AnomalyDetector.DCC_SECONDS_PER_BLOCK;
+      const actualDccBlocks = dccHeight - prev.dccHeight;
+      if (expectedDccBlocks >= 2 && actualDccBlocks < expectedDccBlocks * this.config.minChainProgressRatio) {
+        this.raiseAlert({
+          id: `dcc_stalled_${Date.now()}`,
+          severity: 'critical',
+          category: 'chain_desync',
+          message: `DCC appears stalled: ${actualDccBlocks} blocks advanced in ${elapsedSec.toFixed(0)}s (expected ~${expectedDccBlocks.toFixed(0)})`,
+          data: { actualDccBlocks, expectedDccBlocks, elapsedSec },
+          timestamp: Date.now(),
+          autoPause: true,
+        });
+      }
     }
+    this.previousChainCheck = { timestamp: now, solSlot, dccHeight };
   }
 
   /**
