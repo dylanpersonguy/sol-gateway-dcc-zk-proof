@@ -25,6 +25,9 @@ const SCAN_LAG_BLOCKS = 1;
  */
 const MAX_RESUME_GAP_BLOCKS = 1000;
 
+/** How often to reconcile against contract state, in ms. */
+const RECONCILE_INTERVAL_MS = 60_000;
+
 export interface DccBurnEvent {
   burnId: string;
   sender: string;
@@ -58,6 +61,7 @@ export class DccWatcher extends EventEmitter {
   private logger: Logger;
   private isRunning: boolean = false;
   private isSeeded = false;
+  private seenBurnIds: Set<string> = new Set();
   private lastProcessedHeight: number = 0;
   private pendingBurns: Map<string, DccBurnEvent> = new Map();
 
@@ -127,8 +131,10 @@ export class DccWatcher extends EventEmitter {
         }
         this.isSeeded = true;
         this.saveCursor();
+        this.loadSeenBurns();
         this.runPollLoop();
         this.runFinalityLoop();
+        this.runReconcileLoop();
         return;
       } catch (err: any) {
         this.logger.warn('DCC height fetch failed — retrying', {
@@ -183,6 +189,81 @@ export class DccWatcher extends EventEmitter {
    * Scan a specific block for burn transactions on the bridge contract
    */
   /** Returns false if the block could not be read, so it is retried. */
+  /**
+   * Reconcile against contract state.
+   *
+   * Block scanning cannot be relied on alone here. Under NG a key block keeps
+   * accumulating microblock transactions after it appears, so a block read
+   * moments after the height advances can come back without a burn that is
+   * later part of it — which is how a burn is missed with the cursor sitting
+   * past it and nothing logged anywhere.
+   *
+   * The contract's own burn_ entries are authoritative and cannot race, so this
+   * sweeps them periodically and picks up anything the forward scan missed,
+   * whatever the cause: a microblock race, a restart, a skipped block.
+   */
+  private async runReconcileLoop(): Promise<void> {
+    while (this.isRunning) {
+      try {
+        await this.reconcileBurns();
+      } catch (err: any) {
+        this.logger.warn('Burn reconciliation failed', { error: err?.message ?? err });
+      }
+      await sleep(RECONCILE_INTERVAL_MS);
+    }
+  }
+
+  private async reconcileBurns(): Promise<void> {
+    const res = await this.client.get(`/addresses/data/${this.config.bridgeContract}`);
+    const entries: Array<{ key: string; value: unknown }> = res.data ?? [];
+
+    for (const entry of entries) {
+      if (!entry.key.startsWith('burn_') || entry.key.startsWith('burn_nonce_')) continue;
+      if (typeof entry.value !== 'string') continue;
+
+      const burnId = entry.key.replace('burn_', '');
+      if (this.pendingBurns.has(burnId) || this.seenBurnIds.has(burnId)) continue;
+
+      // caller | solRecipient | splMint | amount | height | timestamp
+      const parts = entry.value.split('|');
+      if (parts.length < 6) continue;
+
+      const event: DccBurnEvent = {
+        burnId,
+        sender: parts[0],
+        solRecipient: parts[1],
+        splMint: parts[2],
+        amount: BigInt(parts[3]) * WSOL_TO_LAMPORTS_DIVISOR,
+        height: parseInt(parts[4], 10),
+        timestamp: parseInt(parts[5], 10),
+        txId: '',
+        confirmations: 0,
+      };
+
+      this.logger.warn('Burn found by reconciliation that block scanning missed', {
+        burnId, height: event.height, amount: event.amount.toString(),
+      });
+      this.pendingBurns.set(burnId, event);
+      this.markSeen(burnId);
+    }
+  }
+
+  /** Burn ids already handled, so a sweep does not replay them. */
+  private markSeen(burnId: string): void {
+    this.seenBurnIds.add(burnId);
+    try {
+      const file = this.cursorFile().replace('cursor', 'seen-burns');
+      fs.writeFileSync(file, JSON.stringify([...this.seenBurnIds]));
+    } catch { /* best effort */ }
+  }
+
+  private loadSeenBurns(): void {
+    try {
+      const file = this.cursorFile().replace('cursor', 'seen-burns');
+      for (const id of JSON.parse(fs.readFileSync(file, 'utf-8'))) this.seenBurnIds.add(id);
+    } catch { /* none yet */ }
+  }
+
   /** Path the scan cursor is written to. */
   private cursorFile(): string {
     return this.config.cursorPath || './data/dcc-watcher-cursor.json';
@@ -275,6 +356,7 @@ export class DccWatcher extends EventEmitter {
       });
 
       this.pendingBurns.set(burnEvent.burnId, burnEvent);
+      this.markSeen(burnEvent.burnId);
     } catch (err) {
       this.logger.debug('Failed to check burn event', { error: err });
     }
