@@ -33,6 +33,7 @@ import {
   SystemProgram,
 } from '@solana/web3.js';
 import * as fs from 'fs';
+import nacl from 'tweetnacl';
 import express from 'express';
 import {
   signAndBroadcastMint,
@@ -146,6 +147,26 @@ async function main(): Promise<void> {
     publicKeyB58: dccSigningPubKeyB58,
   });
 
+  // ── Ed25519 key for unlock attestations ──
+  // Solana verifies unlock signatures with its Ed25519 precompile against the
+  // ValidatorEntry registry, so this must be a registered Solana keypair — a
+  // different key and a different scheme from the DCC seed used for mints.
+  const unlockKeypairPath = process.env.SOLANA_ATTESTATION_KEYPAIR_PATH
+    || `./data/keys/validators/${config.nodeId}.json`;
+  let unlockKeypair: Keypair;
+  try {
+    unlockKeypair = Keypair.fromSecretKey(
+      Uint8Array.from(JSON.parse(fs.readFileSync(unlockKeypairPath, 'utf-8'))),
+    );
+  } catch (err: any) {
+    throw new Error(
+      `Cannot load the unlock attestation keypair from ${unlockKeypairPath}: ${err?.message}. ` +
+      'It must be a Solana keypair JSON registered as a validator on the bridge program, ' +
+      'or unlock attestations cannot verify. Override with SOLANA_ATTESTATION_KEYPAIR_PATH.',
+    );
+  }
+  logger.info('Unlock attestation key', { publicKey: unlockKeypair.publicKey.toBase58() });
+
   // ── Initialize Consensus Engine ──
   const consensus = new ConsensusEngine(
     {
@@ -155,12 +176,18 @@ async function main(): Promise<void> {
       consensusTimeoutMs: config.consensusTimeoutMs,
       maxRetries: config.maxRetries,
     },
-    // DCC-compatible signing: use Curve25519 scheme that matches RIDE sigVerify
-    async (message: Buffer): Promise<Buffer> => {
+    // Sign in whichever scheme the destination chain verifies with.
+    async (message: Buffer, type: 'mint' | 'unlock'): Promise<Buffer> => {
+      if (type === 'unlock') {
+        // Solana Ed25519 precompile
+        return Buffer.from(nacl.sign.detached(new Uint8Array(message), unlockKeypair.secretKey));
+      }
+      // RIDE sigVerify (Curve25519)
       const sigB58: string = dccSignBytes(dccSigningSeed, message) as unknown as string;
       return Buffer.from(dccBase58Decode(sigB58));
     },
-    () => dccSigningPubKeyRaw,
+    (type: 'mint' | 'unlock') =>
+      type === 'unlock' ? Buffer.from(unlockKeypair.publicKey.toBytes()) : dccSigningPubKeyRaw,
   );
 
   // ── Initialize ZK Bridge Service (Phase 2) ──
