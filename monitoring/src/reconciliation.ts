@@ -46,6 +46,12 @@ interface ReconciliationConfig {
   pagerDutyServiceKey?: string;
 }
 
+/**
+ * wSOL is 8dp on DecentralChain, SOL is 9dp on Solana. Mirrors
+ * token_So111...112_divisor on the bridge contract.
+ */
+const SOL_TO_WSOL_DIVISOR = 10n;
+
 function loadConfig(): ReconciliationConfig {
   return {
     solanaRpcUrl: process.env.SOLANA_RPC_URL || 'http://localhost:8899',
@@ -248,9 +254,16 @@ export class ReconciliationDaemon {
       const netLocked = solanaData.totalLocked - solanaData.totalUnlocked;
       const dccNetSupply = dccData.totalMinted - dccData.totalBurned;
 
-      // Drift: positive means DCC has MORE supply than SOL has locked
-      // This is the dangerous direction — it means funds can be withdrawn without backing
-      const drift = dccNetSupply - netLocked;
+      // wSOL carries 8 decimals, lamports 9, so the contract mints
+      // amount / SOL_TO_WSOL_DIVISOR. Comparing the two raw numbers reads a
+      // fully-backed bridge as ~90% under-collateralised — and, far worse,
+      // would read an actual 10x over-mint as perfectly balanced. Convert the
+      // DCC supply back to lamports before comparing.
+      const dccNetSupplyLamports = dccNetSupply * SOL_TO_WSOL_DIVISOR;
+
+      // Positive means DCC has MORE supply than SOL has locked — the dangerous
+      // direction, since it means tokens exist without backing.
+      const drift = dccNetSupplyLamports - netLocked;
       const driftPercent = netLocked > 0n
         ? Number(drift) / Number(netLocked) * 100
         : 0;
@@ -274,6 +287,7 @@ export class ReconciliationDaemon {
         logger.warn('SOL locked without corresponding wSOL supply', {
           netLocked: netLocked.toString(),
           dccNetSupply: dccNetSupply.toString(),
+        dccNetSupplyLamports: dccNetSupplyLamports.toString(),
           shortfall: absDrift.toString(),
         });
       }
