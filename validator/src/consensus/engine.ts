@@ -26,6 +26,8 @@ export interface ConsensusConfig {
   minValidators: number;
   consensusTimeoutMs: number;
   maxRetries: number;
+  /** Chain id inside the signed mint message — the contract's dccChainId (2). */
+  dccBridgeChainId: number;
   /** Path to persist processed transfer IDs (JSON file). Survives restarts. */
   processedTransfersPath?: string;
 }
@@ -468,9 +470,18 @@ export class ConsensusEngine extends EventEmitter {
     }
     const recipient = b58 || '1';
 
-    // Canonical message matching RIDE's toBytes(string):
-    // transferId + "|" + recipient + "|" + amount + "|" + solSlot
-    const message = `${request.transferId}|${recipient}|${event.amount.toString()}|${event.slot}`;
+    // Must match constructLegacyMintMessage() in the RIDE contract byte for
+    // byte, or sigVerify fails and the mint is rejected:
+    //
+    //   "SOL_DCC_BRIDGE_V1|MINT|" + transferId + "|" + recipient + "|"
+    //     + amount + "|" + solSlot + "|" + chainId
+    //
+    // This previously omitted both the domain prefix and the trailing chain id,
+    // so no committee signature could ever verify on-chain. The chain id is the
+    // contract's dccChainId (2), not the network address byte (63).
+    const message =
+      `SOL_DCC_BRIDGE_V1|MINT|${request.transferId}|${recipient}|` +
+      `${event.amount.toString()}|${event.slot}|${this.config.dccBridgeChainId}`;
     return Buffer.from(message, 'utf-8');
   }
 

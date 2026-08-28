@@ -102,7 +102,10 @@ async function main() {
   const node = process.env.DCC_NODE_URL!;
   const contract = process.env.DCC_BRIDGE_CONTRACT!;
   const seed = process.env.DCC_SIGNING_SEED || process.env.DCC_VALIDATOR_SEED!;
-  const chainId = parseInt(process.env.DCC_CHAIN_ID || '63', 10);
+  // NOTE: this is the bridge protocol's chain identifier used for domain
+  // separation inside the signed message (`let dccChainId = 2` in the RIDE
+  // contract). It is NOT DCC_CHAIN_ID=63, which is the network address byte.
+  const chainId = parseInt(process.env.DCC_BRIDGE_CHAIN_ID || '2', 10);
 
   console.log(broadcast ? '=== SETTLE (BROADCASTING) ===' : validateOnly ? '=== SETTLE (validate against node — nothing is sent) ===' : '=== SETTLE (dry run — nothing is sent) ===');
 
