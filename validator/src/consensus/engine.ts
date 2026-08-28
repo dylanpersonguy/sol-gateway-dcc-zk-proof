@@ -18,6 +18,7 @@ import { createLogger } from '../utils/logger';
 import { SolanaDepositEvent } from '../watchers/solana-watcher';
 import { DccBurnEvent } from '../watchers/dcc-watcher';
 import { verifySignature as dccVerifySignature } from '@decentralchain/ts-lib-crypto';
+import nacl from 'tweetnacl';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -65,8 +66,19 @@ export interface ConsensusResult {
   requestTimestamp?: number;
 }
 
-type SignCallback = (message: Buffer) => Promise<Buffer>;
-type PublicKeyCallback = () => Buffer;
+/**
+ * Mint and unlock attestations are checked by different verifiers with
+ * incompatible schemes, so each is signed with its own key:
+ *
+ *   mint   -> RIDE sigVerify on the DCC contract   -> Curve25519 (DCC seed key)
+ *   unlock -> Solana's Ed25519 precompile          -> Ed25519 (Solana keypair)
+ *
+ * Signing both with one key, as this used to, means one of the two can never
+ * verify. The callbacks therefore take the attestation type.
+ */
+type AttestationType = 'mint' | 'unlock';
+type SignCallback = (message: Buffer, type: AttestationType) => Promise<Buffer>;
+type PublicKeyCallback = (type: AttestationType) => Buffer;
 
 export class ConsensusEngine extends EventEmitter {
   private config: ConsensusConfig;
@@ -161,7 +173,7 @@ export class ConsensusEngine extends EventEmitter {
       this.registeredValidators.add(pk);
     }
     // Always include our own key
-    this.registeredValidators.add(this.getPublicKey().toString('hex'));
+    this.registeredValidators.add(this.getPublicKey('mint').toString('hex'));
     this.logger.info('Validator set synced', { count: this.registeredValidators.size });
   }
 
@@ -190,8 +202,8 @@ export class ConsensusEngine extends EventEmitter {
     const message = this.constructCanonicalMessage(request);
 
     // Sign the message locally
-    const signature = await this.signMessage(message);
-    const publicKey = this.getPublicKey();
+    const signature = await this.signMessage(message, type);
+    const publicKey = this.getPublicKey(type);
 
     const localAttestation: Attestation = {
       // VAL-6 (see receiveAttestation) requires an attestation's nodeId to be
@@ -273,13 +285,22 @@ export class ConsensusEngine extends EventEmitter {
       return;
     }
 
-    // ── GUARD: DCC Curve25519 signature verification (H-1 fix) ──
+    // ── GUARD: signature verification, in the scheme that attestation's
+    // destination chain will use (H-1 fix) ──
+    // Verifying an unlock attestation with the DCC scheme would reject a
+    // perfectly good Ed25519 signature — and, worse, accept nothing at all.
     try {
-      const isValid = dccVerifySignature(
-        new Uint8Array(attestation.publicKey),
-        new Uint8Array(attestation.messageHash),
-        new Uint8Array(attestation.signature),
-      );
+      const isValid = attestation.type === 'unlock'
+        ? nacl.sign.detached.verify(
+            new Uint8Array(attestation.messageHash),
+            new Uint8Array(attestation.signature),
+            new Uint8Array(attestation.publicKey),
+          )
+        : dccVerifySignature(
+            new Uint8Array(attestation.publicKey),
+            new Uint8Array(attestation.messageHash),
+            new Uint8Array(attestation.signature),
+          );
       if (!isValid) {
         this.logger.error('REJECTING attestation with INVALID signature', {
           transferId,
