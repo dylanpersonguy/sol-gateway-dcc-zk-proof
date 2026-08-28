@@ -52,6 +52,12 @@ jobs:
       - name: Security tests
         run: npx mocha --config .mocharc.yml 'security/**/*.test.ts'
         working-directory: tests
+      # Guards the TS <-> on-chain format contracts. Reads the RIDE and Rust
+      # sources, so editing a contract without updating the client fails here.
+      - name: Format contracts
+        run: npx mocha --config .mocharc.yml 'formats/**/*.test.ts'
+        working-directory: tests
+
       - name: Encoding vectors
         run: npx vitest run libs/encoding-ts/tests/encoding.test.ts
 

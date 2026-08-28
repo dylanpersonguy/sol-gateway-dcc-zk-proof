@@ -9,7 +9,8 @@
     "test:unit": "mocha --config .mocharc.yml unit/**/*.test.ts",
     "test:adversarial": "mocha --config .mocharc.yml adversarial/**/*.test.ts",
     "test:zk-bridge": "mocha --config .mocharc.yml unit/**/*.test.ts adversarial/**/*.test.ts",
-    "test": "mocha --config .mocharc.yml 'unit/**/*.test.ts' 'adversarial/**/*.test.ts'"
+    "test": "mocha --config .mocharc.yml 'unit/**/*.test.ts' 'adversarial/**/*.test.ts' 'formats/**/*.test.ts'",
+    "test:formats": "mocha --config .mocharc.yml 'formats/**/*.test.ts'"
   },
   "dependencies": {
     "ethers": "^6.13.0"

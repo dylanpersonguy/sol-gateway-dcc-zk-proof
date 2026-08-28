@@ -4,6 +4,7 @@ require:
 spec:
   - "unit/**/*.test.ts"
   - "adversarial/**/*.test.ts"
+  - "formats/**/*.test.ts"
 
 timeout: 30000
 recursive: true
