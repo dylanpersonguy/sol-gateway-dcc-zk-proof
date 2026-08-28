@@ -6,6 +6,7 @@
 // Must verify burns independently — never trust unverified events.
 
 import { EventEmitter } from 'events';
+import * as fs from 'fs';
 import axios, { AxiosInstance } from 'axios';
 import { Logger } from 'winston';
 import { createLogger } from '../utils/logger';
@@ -15,6 +16,14 @@ const WSOL_TO_LAMPORTS_DIVISOR = 10n;
 
 /** Blocks to stay behind the tip so only settled blocks are scanned. */
 const SCAN_LAG_BLOCKS = 1;
+
+/**
+ * How far behind the tip a persisted cursor may be and still be resumed.
+ * ~1000 blocks is roughly a day at 60s. Beyond that, catching up would take
+ * long enough that a deliberate sweep is the better answer, so it says so
+ * loudly rather than grinding.
+ */
+const MAX_RESUME_GAP_BLOCKS = 1000;
 
 export interface DccBurnEvent {
   burnId: string;
@@ -31,6 +40,8 @@ export interface DccBurnEvent {
 }
 
 export interface DccWatcherConfig {
+  /** Where the scan cursor is persisted so a restart resumes rather than skips. */
+  cursorPath?: string;
   nodeUrl: string;
   /** SECURITY FIX (VAL-7): Secondary DCC node URL for multi-node verification.
    *  If set, burn events must be confirmed by BOTH nodes. */
@@ -92,9 +103,30 @@ export class DccWatcher extends EventEmitter {
 
     while (this.isRunning) {
       try {
-        this.lastProcessedHeight = await this.getCurrentHeight();
+        const tip = await this.getCurrentHeight();
+        const resumed = this.loadCursor();
+
+        if (resumed !== null && resumed < tip && tip - resumed <= MAX_RESUME_GAP_BLOCKS) {
+          // Pick up where the last run stopped. Seeding from the tip instead
+          // silently drops every burn that landed while this validator was
+          // down — the funds stay locked and only a manual sweep finds them.
+          this.lastProcessedHeight = resumed;
+          this.logger.info('Resuming from persisted height', {
+            height: resumed, tip, blocksToCatchUp: tip - resumed,
+          });
+        } else {
+          if (resumed !== null && tip - resumed > MAX_RESUME_GAP_BLOCKS) {
+            this.logger.error(
+              'Persisted cursor is too far behind to catch up — burns in the gap ' +
+              'will NOT be picked up and need a manual sweep',
+              { resumed, tip, gap: tip - resumed, maxGap: MAX_RESUME_GAP_BLOCKS },
+            );
+          }
+          this.lastProcessedHeight = tip;
+          this.logger.info('Starting from height', { height: this.lastProcessedHeight });
+        }
         this.isSeeded = true;
-        this.logger.info('Starting from height', { height: this.lastProcessedHeight });
+        this.saveCursor();
         this.runPollLoop();
         this.runFinalityLoop();
         return;
@@ -136,6 +168,7 @@ export class DccWatcher extends EventEmitter {
             const scanned = await this.scanBlock(h);
             if (!scanned) break;
             this.lastProcessedHeight = h;
+            this.saveCursor();
           }
         }
       } catch (err) {
@@ -150,6 +183,37 @@ export class DccWatcher extends EventEmitter {
    * Scan a specific block for burn transactions on the bridge contract
    */
   /** Returns false if the block could not be read, so it is retried. */
+  /** Path the scan cursor is written to. */
+  private cursorFile(): string {
+    return this.config.cursorPath || './data/dcc-watcher-cursor.json';
+  }
+
+  /** Last height fully scanned by a previous run, or null. */
+  private loadCursor(): number | null {
+    try {
+      const raw = fs.readFileSync(this.cursorFile(), 'utf-8');
+      const parsed = JSON.parse(raw);
+      const height = Number(parsed?.lastProcessedHeight);
+      return Number.isFinite(height) && height > 0 ? height : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private saveCursor(): void {
+    try {
+      const file = this.cursorFile();
+      const dir = file.substring(0, file.lastIndexOf('/'));
+      if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({
+        lastProcessedHeight: this.lastProcessedHeight,
+        updatedAt: Date.now(),
+      }));
+    } catch (err: any) {
+      this.logger.warn('Could not persist the scan cursor', { error: err?.message });
+    }
+  }
+
   private async scanBlock(height: number): Promise<boolean> {
     try {
       const response = await this.client.get(`/blocks/at/${height}`);
